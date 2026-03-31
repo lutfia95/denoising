@@ -1,0 +1,17 @@
+feature_engineering:
+  use_log_intensity: true
+  use_relative_intensity: true
+  use_mz_over_precursor: true
+  use_delta_to_precursor: true
+  use_delta_neighbors: true
+  use_tic: true # total ion current = sum(int_arr)
+  use_num_peaks: true # number of peaks = len(mz_arr) after standard preprocessing
+  sort_by_mz: true
+  eps: 1.0e-8 # avoid division by zero
+
+fdr:
+  enabled: true # if false, every spectrum gets weight 1.0
+  clip_min: 0.0 # minimum allowed FDR after clipping --> negative FDR becomes 0.0
+  clip_max: 0.01 # maximum allowed FDR after clipping --> results are based on 1% FDR
+  weight_min: 0.2 # minimum training weight
+  mode: linear # lower FDR --> higher weight
