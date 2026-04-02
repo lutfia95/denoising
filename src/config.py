@@ -113,6 +113,8 @@ class OutputConfig:
     save_plots: bool
     save_confusion_matrices: bool
     device_verbose: bool
+    enable_file_logging: bool
+    log_file_name: str
 
 def load_config(config_path: str | Path) -> AppConfig:
     path = Path(config_path)
@@ -210,6 +212,8 @@ def load_training_config(config_path: str | Path) -> TrainingConfig:
         save_plots=bool(output_cfg.get("save_plots", True)),
         save_confusion_matrices=bool(output_cfg.get("save_confusion_matrices", True)),
         device_verbose=bool(output_cfg.get("device_verbose", True)),
+        enable_file_logging=bool(output_cfg.get("enable_file_logging", True)),
+        log_file_name=str(output_cfg.get("log_file_name", "training.log")),
     )
 
     model = MLPConfig(
@@ -347,6 +351,8 @@ def load_transformer_training_config(config_path: str | Path) -> TrainingConfig:
         save_plots=bool(output_cfg.get("save_plots", True)),
         save_confusion_matrices=bool(output_cfg.get("save_confusion_matrices", True)),
         device_verbose=bool(output_cfg.get("device_verbose", True)),
+        enable_file_logging=bool(output_cfg.get("enable_file_logging", True)),
+        log_file_name=str(output_cfg.get("log_file_name", "training.log")),
     )
 
     model = PeakTransformerConfig(

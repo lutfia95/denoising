@@ -15,6 +15,8 @@ output:
   save_plots: true
   save_confusion_matrices: true
   device_verbose: true
+  enable_file_logging: true
+  log_file_name: "training.log"
 
 features:
   peak_feature_columns:

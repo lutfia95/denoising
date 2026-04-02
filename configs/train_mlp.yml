@@ -15,6 +15,8 @@ output:
   save_plots: true # save training curves such as loss and PR-AUC
   save_confusion_matrices: true # save confusion matrices for validation and test
   device_verbose: true # print device infos! important for GPU/used-CPUs :)
+  enable_file_logging: true # mirror all console training output into a log file
+  log_file_name: "training.log" # written inside the model output directory
 
 features:
   peak_feature_columns:

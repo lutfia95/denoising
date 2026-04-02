@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from src.config import TrainingConfig
 from src.model.mlp import MLPPeakClassifier
+from src.training.logging_utils import tee_output
 
 
 def print_device_info(device: torch.device) -> dict[str, object]:
@@ -293,224 +294,242 @@ def train_mlp(
 
     output_dir = Path(config.output.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    device_verbose = config.output.device_verbose
-    used_device = _resolve_device(device)
-    device_info = print_device_info(used_device)
-    if device_verbose: print(device_info)
-    
-    train_df = pd.read_parquet(config.data.train_path)
-    val_df = pd.read_parquet(config.data.val_path)
-    test_df = pd.read_parquet(config.data.test_path)
+    log_path = output_dir / config.output.log_file_name
+    with tee_output(log_path, enabled=config.output.enable_file_logging):
+        print(f"[LOG] Writing training output to: {log_path}")
+        device_verbose = config.output.device_verbose
+        used_device = _resolve_device(device)
+        device_info = print_device_info(used_device)
+        if device_verbose:
+            print(device_info)
 
-    normalizer = fit_feature_normalizer(train_df, config)
+        train_df = pd.read_parquet(config.data.train_path)
+        val_df = pd.read_parquet(config.data.val_path)
+        test_df = pd.read_parquet(config.data.test_path)
 
-    train_dataset = MLPSpectrumDataset(
-        df=train_df,
-        config=config,
-        normalizer=normalizer,
-        split_name="train",
-    )
-    val_dataset = MLPSpectrumDataset(
-        df=val_df,
-        config=config,
-        normalizer=normalizer,
-        split_name="val",
-    )
-    test_dataset = MLPSpectrumDataset(
-        df=test_df,
-        config=config,
-        normalizer=normalizer,
-        split_name="test",
-    )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.training.batch_size,
-        shuffle=True,
-        num_workers=config.training.num_workers,
-        collate_fn=mlp_collate_fn,
-    )
-    print("[DEV] Finished train loader!")
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.training.batch_size,
-        shuffle=False,
-        num_workers=config.training.num_workers,
-        collate_fn=mlp_collate_fn,
-    )
-    print("[DEV] Finished val loader!")
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config.training.batch_size,
-        shuffle=False,
-        num_workers=config.training.num_workers,
-        collate_fn=mlp_collate_fn,
-    )
-    print("[DEV] Finished test loader!")
-    model = model.to(used_device)
+        normalizer = fit_feature_normalizer(train_df, config)
 
-    optimizer = _build_optimizer(model, config)
-    pos_weight = compute_pos_weight(train_df, config) if config.loss.use_pos_weight else None
-    criterion = _build_loss(config, used_device, pos_weight=pos_weight)
-
-    history: list[dict[str, float]] = []
-    best_state_dict: dict[str, Tensor] | None = None
-    best_epoch = -1
-    best_score = -np.inf if config.early_stopping.mode == "max" else np.inf
-    bad_epochs = 0
-
-    monitor_name = config.early_stopping.monitor.removeprefix("val_")
-    print(f"[DEV] Monitor Name: {monitor_name}")
-
-    for epoch in range(1, config.training.max_epochs + 1):
-        train_metrics = run_one_epoch(
-            model=model,
-            loader=train_loader,
-            optimizer=optimizer,
-            criterion=criterion,
-            config=config,
-            device=used_device,
-            training=True,
-        )
-        val_metrics = run_one_epoch(
-            model=model,
-            loader=val_loader,
-            optimizer=None,
-            criterion=criterion,
-            config=config,
-            device=used_device,
-            training=False,
-        )
-
-        epoch_record = {"epoch": float(epoch)}
-        for key, value in train_metrics.items():
-            epoch_record[f"train_{key}"] = float(value)
-        for key, value in val_metrics.items():
-            epoch_record[f"val_{key}"] = float(value)
-        history.append(epoch_record)
-
-        monitor_value = float(val_metrics[monitor_name])
-        improved = _is_improved(
-            current=monitor_value,
-            best=best_score,
-            mode=config.early_stopping.mode,
-            min_delta=config.early_stopping.min_delta,
-        )
-
-        if improved:
-            best_score = monitor_value
-            best_epoch = epoch
-            best_state_dict = _state_dict_to_cpu(deepcopy(model.state_dict()))
-            bad_epochs = 0
-        else:
-            bad_epochs += 1
-
-        print(
-            f"Epoch {epoch:03d} | "
-            f"train_loss={train_metrics['loss']:.6f} | "
-            f"val_loss={val_metrics['loss']:.6f} | "
-            f"val_pr_auc={val_metrics.get('pr_auc', np.nan):.6f}"
-        )
-
-        if config.early_stopping.enabled and bad_epochs >= config.early_stopping.patience:
-            print(f"Early stopping at epoch {epoch}. Best epoch was {best_epoch}.")
-            break
-
-    if best_state_dict is None:
-        best_state_dict = _state_dict_to_cpu(deepcopy(model.state_dict()))
-        best_epoch = len(history)
-
-    model.load_state_dict(best_state_dict)
-    model = model.to(used_device)
-
-    final_val_eval = evaluate_loader(
-        model=model,
-        loader=val_loader,
-        criterion=criterion,
-        config=config,
-        device=used_device,
-    )
-    final_test_eval = evaluate_loader(
-        model=model,
-        loader=test_loader,
-        criterion=criterion,
-        config=config,
-        device=used_device,
-    )
-
-    history_df = pd.DataFrame(history)
-
-    val_conf = build_confusion_summary(
-        probs=final_val_eval["probs"],
-        targets=final_val_eval["targets"],
-        threshold=config.evaluation.threshold_for_binary_metrics,
-    )
-    test_conf = build_confusion_summary(
-        probs=final_test_eval["probs"],
-        targets=final_test_eval["targets"],
-        threshold=config.evaluation.threshold_for_binary_metrics,
-    )
-
-    if config.output.save_best_model:
-        save_best_checkpoint(
-            output_dir=output_dir,
-            model_state_dict=best_state_dict,
+        train_dataset = MLPSpectrumDataset(
+            df=train_df,
             config=config,
             normalizer=normalizer,
-            best_epoch=best_epoch,
-            best_score=float(best_score),
-            pos_weight=pos_weight,
+            split_name="train",
+        )
+        val_dataset = MLPSpectrumDataset(
+            df=val_df,
+            config=config,
+            normalizer=normalizer,
+            split_name="val",
+        )
+        test_dataset = MLPSpectrumDataset(
+            df=test_df,
+            config=config,
+            normalizer=normalizer,
+            split_name="test",
         )
 
-    if config.output.save_epoch_history:
-        history_df.to_csv(output_dir / "history.csv", index=False)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.training.batch_size,
+            shuffle=True,
+            num_workers=config.training.num_workers,
+            collate_fn=mlp_collate_fn,
+        )
+        print("[DEV] Finished train loader!")
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config.training.batch_size,
+            shuffle=False,
+            num_workers=config.training.num_workers,
+            collate_fn=mlp_collate_fn,
+        )
+        print("[DEV] Finished val loader!")
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=config.training.batch_size,
+            shuffle=False,
+            num_workers=config.training.num_workers,
+            collate_fn=mlp_collate_fn,
+        )
+        print("[DEV] Finished test loader!")
+        model = model.to(used_device)
 
-    if config.output.save_metrics_summary:
-        metrics_summary = {
-            "best_epoch": int(best_epoch),
+        optimizer = _build_optimizer(model, config)
+        pos_weight = (
+            compute_pos_weight(train_df, config) if config.loss.use_pos_weight else None
+        )
+        criterion = _build_loss(config, used_device, pos_weight=pos_weight)
+
+        history: list[dict[str, float]] = []
+        best_state_dict: dict[str, Tensor] | None = None
+        best_epoch = -1
+        best_score = -np.inf if config.early_stopping.mode == "max" else np.inf
+        bad_epochs = 0
+
+        monitor_name = config.early_stopping.monitor.removeprefix("val_")
+        print(f"[DEV] Monitor Name: {monitor_name}")
+
+        for epoch in range(1, config.training.max_epochs + 1):
+            train_metrics = run_one_epoch(
+                model=model,
+                loader=train_loader,
+                optimizer=optimizer,
+                criterion=criterion,
+                config=config,
+                device=used_device,
+                training=True,
+            )
+            val_metrics = run_one_epoch(
+                model=model,
+                loader=val_loader,
+                optimizer=None,
+                criterion=criterion,
+                config=config,
+                device=used_device,
+                training=False,
+            )
+
+            epoch_record = {"epoch": float(epoch)}
+            for key, value in train_metrics.items():
+                epoch_record[f"train_{key}"] = float(value)
+            for key, value in val_metrics.items():
+                epoch_record[f"val_{key}"] = float(value)
+            history.append(epoch_record)
+
+            monitor_value = float(val_metrics[monitor_name])
+            improved = _is_improved(
+                current=monitor_value,
+                best=best_score,
+                mode=config.early_stopping.mode,
+                min_delta=config.early_stopping.min_delta,
+            )
+
+            if improved:
+                best_score = monitor_value
+                best_epoch = epoch
+                best_state_dict = _state_dict_to_cpu(deepcopy(model.state_dict()))
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+
+            print(
+                f"Epoch {epoch:03d} | "
+                f"train_loss={train_metrics['loss']:.6f} | "
+                f"val_loss={val_metrics['loss']:.6f} | "
+                f"val_pr_auc={val_metrics.get('pr_auc', np.nan):.6f}"
+            )
+
+            if (
+                config.output.save_epoch_history
+                and history
+                and (epoch == 1 or epoch % 5 == 0)
+            ):
+                pd.DataFrame(history).to_csv(output_dir / "history.csv", index=False)
+
+            if (
+                config.early_stopping.enabled
+                and bad_epochs >= config.early_stopping.patience
+            ):
+                print(f"Early stopping at epoch {epoch}. Best epoch was {best_epoch}.")
+                break
+
+        if best_state_dict is None:
+            best_state_dict = _state_dict_to_cpu(deepcopy(model.state_dict()))
+            best_epoch = len(history)
+
+        model.load_state_dict(best_state_dict)
+        model = model.to(used_device)
+
+        final_val_eval = evaluate_loader(
+            model=model,
+            loader=val_loader,
+            criterion=criterion,
+            config=config,
+            device=used_device,
+        )
+        final_test_eval = evaluate_loader(
+            model=model,
+            loader=test_loader,
+            criterion=criterion,
+            config=config,
+            device=used_device,
+        )
+
+        history_df = pd.DataFrame(history)
+
+        val_conf = build_confusion_summary(
+            probs=final_val_eval["probs"],
+            targets=final_val_eval["targets"],
+            threshold=config.evaluation.threshold_for_binary_metrics,
+        )
+        test_conf = build_confusion_summary(
+            probs=final_test_eval["probs"],
+            targets=final_test_eval["targets"],
+            threshold=config.evaluation.threshold_for_binary_metrics,
+        )
+
+        if config.output.save_best_model:
+            save_best_checkpoint(
+                output_dir=output_dir,
+                model_state_dict=best_state_dict,
+                config=config,
+                normalizer=normalizer,
+                best_epoch=best_epoch,
+                best_score=float(best_score),
+                pos_weight=pos_weight,
+            )
+
+        if config.output.save_epoch_history:
+            history_df.to_csv(output_dir / "history.csv", index=False)
+
+        if config.output.save_metrics_summary:
+            metrics_summary = {
+                "best_epoch": int(best_epoch),
+                "best_monitor_value": float(best_score),
+                "monitor_name": config.early_stopping.monitor,
+                "val_metrics": _to_jsonable(final_val_eval["metrics"]),
+                "test_metrics": _to_jsonable(final_test_eval["metrics"]),
+                "val_confusion_matrix": val_conf,
+                "test_confusion_matrix": test_conf,
+                "threshold_for_binary_metrics": float(
+                    config.evaluation.threshold_for_binary_metrics
+                ),
+            }
+            with (output_dir / "metrics_summary.json").open(
+                "w", encoding="utf-8"
+            ) as handle:
+                json.dump(metrics_summary, handle, indent=2)
+
+        if config.output.save_plots:
+            save_training_plots(history_df, output_dir)
+
+        if config.output.save_confusion_matrices:
+            save_confusion_outputs(
+                output_dir=output_dir,
+                name="val",
+                confusion_summary=val_conf,
+            )
+            save_confusion_outputs(
+                output_dir=output_dir,
+                name="test",
+                confusion_summary=test_conf,
+            )
+
+        return {
+            "model": model,
+            "device": str(used_device),
+            "device_info": device_info,
+            "history": history_df,
+            "best_epoch": best_epoch,
             "best_monitor_value": float(best_score),
-            "monitor_name": config.early_stopping.monitor,
-            "val_metrics": _to_jsonable(final_val_eval["metrics"]),
-            "test_metrics": _to_jsonable(final_test_eval["metrics"]),
+            "final_val_metrics": final_val_eval["metrics"],
+            "final_test_metrics": final_test_eval["metrics"],
             "val_confusion_matrix": val_conf,
             "test_confusion_matrix": test_conf,
-            "threshold_for_binary_metrics": float(
-                config.evaluation.threshold_for_binary_metrics
-            ),
+            "normalizer": normalizer,
+            "pos_weight": None if pos_weight is None else float(pos_weight),
+            "output_dir": output_dir,
         }
-        with (output_dir / "metrics_summary.json").open("w", encoding="utf-8") as handle:
-            json.dump(metrics_summary, handle, indent=2)
-
-    if config.output.save_plots:
-        save_training_plots(history_df, output_dir)
-
-    if config.output.save_confusion_matrices:
-        save_confusion_outputs(
-            output_dir=output_dir,
-            name="val",
-            confusion_summary=val_conf,
-        )
-        save_confusion_outputs(
-            output_dir=output_dir,
-            name="test",
-            confusion_summary=test_conf,
-        )
-
-    return {
-        "model": model,
-        "device": str(used_device),
-        "device_info": device_info,
-        "history": history_df,
-        "best_epoch": best_epoch,
-        "best_monitor_value": float(best_score),
-        "final_val_metrics": final_val_eval["metrics"],
-        "final_test_metrics": final_test_eval["metrics"],
-        "val_confusion_matrix": val_conf,
-        "test_confusion_matrix": test_conf,
-        "normalizer": normalizer,
-        "pos_weight": None if pos_weight is None else float(pos_weight),
-        "output_dir": output_dir,
-    }
 
 
 def run_one_epoch(
