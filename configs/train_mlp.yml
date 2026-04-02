@@ -1,0 +1,99 @@
+data:
+  train_path: "../data/splits/train.parquet"
+  val_path: "../data/splits/val.parquet"
+  test_path: "../data/splits/test.parquet"
+
+  target_column: "annotation_mask" # peak-level labels where True means signal and False means noise
+  use_training_weights: false # stage 1 MLP ignores FDR-derived weights (this will be used only in the Loss)
+  weight_column: "weight" # column name for training weights used in later stages
+
+output:
+  output_dir: "outputs/mlp_baseline" # directory where training artifacts will be saved
+  save_best_model: true # save the best checkpoint for later inference
+  save_epoch_history: true # save epoch-by-epoch metrics as a table
+  save_metrics_summary: true # save final validation and test metrics
+  save_plots: true # save training curves such as loss and PR-AUC
+  save_confusion_matrices: true # save confusion matrices for validation and test
+  device_verbose: true # print device infos! important for GPU/used-CPUs :)
+
+features:
+  peak_feature_columns:
+    - "peak_feature_mz"
+    - "peak_feature_log_intensity"
+    - "peak_feature_relative_intensity"
+    - "peak_feature_mz_over_precursor"
+    - "peak_feature_delta_to_precursor" # precursor m/z minus peak m/z
+    - "peak_feature_delta_prev" # m/z difference to the previous peak after sorting
+    - "peak_feature_delta_next" # m/z difference to the next peak after sorting
+
+  spectrum_feature_columns:
+    - "Charge" # precursor charge state
+    - "exp m/z" # precursor experimental m/z
+    - "num_peaks" # number of peaks in the processed spectrum
+    - "tic" # total ion current computed as the sum of intensities
+
+  use_raw_peak_mz: false # optional raw per-peak m/z input from mz_arr
+  raw_peak_mz_column: "mz_arr"
+  use_raw_peak_intensity: false # optional raw per-peak intensity input from int_arr
+  raw_peak_intensity_column: "int_arr"
+  sort_raw_peak_inputs_by_mz: true # keep raw arrays aligned with sorted engineered peak features
+  broadcast_spectrum_features_to_peaks: true # repeat spectrum-level features for every peak before concatenation
+  normalize_peak_features: true # apply feature normalization to peak-level inputs
+  normalize_spectrum_features: true # apply feature normalization to spectrum-level inputs
+  normalization_fit_split: "train" # fit normalization statistics only on the training split
+
+model:
+  name: "mlp_peak_classifier" 
+
+  mlp:
+    hidden_dims: [128, 64] # hidden layer sizes of the MLP
+    dropout: 0.1 # dropout probability used between hidden layers
+    activation: "gelu" # non-linear activation function used in the MLP
+    use_layer_norm: true # apply layer normalization in hidden layers
+    output_dim: 1 # one output logit per peak
+
+training:
+  seed: 42 # random seed for reproducible training behavior
+  batch_size: 32 # number of spectra loaded together per batch
+  num_workers: 0 # number of dataloader worker processes
+  max_epochs: 50 # maximum number of training epochs
+
+  optimizer:
+    name: "adamw" # optimizer used for parameter updates
+    learning_rate: 0.001 # optimizer learning rate
+    weight_decay: 0.0001 # L2-style regularization strength
+
+  scheduler:
+    enabled: false # no learning-rate scheduler is used in the first baseline
+
+  gradient_clip_norm: 1.0 # clip gradients to avoid unstable large updates
+
+loss:
+  name: "bce_with_logits" # binary cross-entropy loss applied to raw logits
+  use_pos_weight: true # compensate for class imbalance using positive-class weighting
+  pos_weight: null # if null, estimate the positive-class weight from the training split
+  reduction: "none" # keep unreduced loss values so masking and weighting stay flexible
+
+early_stopping:
+  enabled: true # stop training early when validation performance stops improving
+  monitor: "val_pr_auc" # validation metric used to decide early stopping
+  mode: "max" # higher values of the monitored metric are better
+  patience: 7 # number of bad epochs allowed before stopping
+  min_delta: 0.0001 # minimum improvement required to count as progress
+
+evaluation:
+  primary_metric: "pr_auc" # main metric used to compare models
+  threshold_for_binary_metrics: 0.5 # probability threshold for binary predictions
+
+  report_metrics:
+    - "pr_auc" # precision-recall area under the curve
+    - "roc_auc" # ROC area under the curve
+    - "f1" # harmonic mean of precision and recall
+    - "mcc" # Matthews correlation coefficient for imbalanced binary classification
+    - "precision" # fraction of predicted positives that are correct
+    - "recall" # fraction of true positives that are recovered
+
+  retained_peak_fractions:
+    - 0.3 # evaluate how well the model keeps signal when retaining the top 30% of peaks
+    - 0.5 # evaluate how well the model keeps signal when retaining the top 50% of peaks
+    - 0.7 # evaluate how well the model keeps signal when retaining the top 70% of peaks

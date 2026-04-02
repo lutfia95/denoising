@@ -1,0 +1,104 @@
+data:
+  train_path: "../data/splits/train.parquet"
+  val_path: "../data/splits/val.parquet"
+  test_path: "../data/splits/test.parquet"
+
+  target_column: "annotation_mask"
+  use_training_weights: false
+  weight_column: "weight"
+
+output:
+  output_dir: "outputs/transformer_peak_classifier"
+  save_best_model: true
+  save_epoch_history: true
+  save_metrics_summary: true
+  save_plots: true
+  save_confusion_matrices: true
+  device_verbose: true
+
+features:
+  peak_feature_columns:
+    - "peak_feature_mz"
+    - "peak_feature_log_intensity"
+    - "peak_feature_relative_intensity"
+    - "peak_feature_mz_over_precursor"
+    - "peak_feature_delta_to_precursor"
+    - "peak_feature_delta_prev"
+    - "peak_feature_delta_next"
+
+  spectrum_feature_columns:
+    - "Charge"
+    - "exp m/z"
+    - "num_peaks"
+    - "tic"
+
+  use_raw_peak_mz: true
+  raw_peak_mz_column: "mz_arr"
+  use_raw_peak_intensity: true
+  raw_peak_intensity_column: "int_arr"
+  sort_raw_peak_inputs_by_mz: true
+  broadcast_spectrum_features_to_peaks: false
+  normalize_peak_features: true
+  normalize_spectrum_features: true
+  normalization_fit_split: "train"
+
+model:
+  name: "transformer_peak_classifier"
+
+  transformer:
+    d_model: 96
+    num_heads: 4
+    num_layers: 3
+    ff_multiplier: 4.0
+    dropout: 0.1
+    activation: "gelu"
+    use_layer_norm: true
+    output_dim: 1
+    use_spectrum_context_gating: true
+    use_peak_positional_projection: true
+
+training:
+  seed: 42
+  batch_size: 13
+  num_workers: 2
+  max_epochs: 50
+
+  optimizer:
+    name: "adamw"
+    learning_rate: 0.0003
+    weight_decay: 0.0001
+
+  scheduler:
+    enabled: false
+
+  gradient_clip_norm: 1.0
+
+loss:
+  name: "bce_with_logits"
+  use_pos_weight: true
+  pos_weight: null
+  reduction: "none"
+
+early_stopping:
+  enabled: true
+  monitor: "val_pr_auc"
+  mode: "max"
+  patience: 7
+  min_delta: 0.0001
+
+evaluation:
+  primary_metric: "pr_auc"
+  threshold_for_binary_metrics: 0.5
+
+  report_metrics:
+    - "pr_auc"
+    - "roc_auc"
+    - "f1"
+    - "mcc"
+    - "precision"
+    - "recall"
+
+  retained_peak_fractions:
+    - 0.3
+    - 0.5
+    - 0.7
