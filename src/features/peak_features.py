@@ -27,12 +27,10 @@ class PeakFeatureComputer:
             raise ValueError("eps must be > 0")
 
     def compute(self, record: SpectrumRecord) -> tuple[SpectrumRecord, PeakFeatureSet]:
-        record.validate()
-
         processed_record = self._prepare_record(record)
 
-        mz_arr = processed_record.mz_arr.astype(np.float32, copy=False)
-        int_arr = processed_record.int_arr.astype(np.float32, copy=False)
+        mz_arr = processed_record.mz_arr
+        int_arr = processed_record.int_arr
         precursor_mz = float(processed_record.precursor_mz)
 
         log_intensity = None
@@ -72,19 +70,30 @@ class PeakFeatureComputer:
         return processed_record, feature_set
 
     def _prepare_record(self, record: SpectrumRecord) -> SpectrumRecord:
-        mz_arr = record.mz_arr.astype(np.float32, copy=True)
-        int_arr = record.int_arr.astype(np.float32, copy=True)
-        annotation_mask = None
+        mz_arr = np.asarray(record.mz_arr, dtype=np.float32)
+        int_arr = np.asarray(record.int_arr, dtype=np.float32)
+        annotation_mask = (
+            None
+            if record.annotation_mask is None
+            else np.asarray(record.annotation_mask, dtype=bool)
+        )
 
-        if record.annotation_mask is not None:
-            annotation_mask = record.annotation_mask.copy()
+        needs_new_record = (
+            mz_arr is not record.mz_arr
+            or int_arr is not record.int_arr
+            or annotation_mask is not record.annotation_mask
+        )
 
-        if self.config.sort_by_mz:
+        if self.config.sort_by_mz and mz_arr.size > 1 and not self._is_sorted_non_decreasing(mz_arr):
             order = np.argsort(mz_arr)
             mz_arr = mz_arr[order]
             int_arr = int_arr[order]
             if annotation_mask is not None:
                 annotation_mask = annotation_mask[order]
+            needs_new_record = True
+
+        if not needs_new_record:
+            return record
 
         return SpectrumRecord(
             search_id=record.search_id,
@@ -99,8 +108,12 @@ class PeakFeatureComputer:
             scan_id=record.scan_id,
         )
 
+    @staticmethod
+    def _is_sorted_non_decreasing(values: np.ndarray) -> bool:
+        return bool(np.all(values[:-1] <= values[1:]))
+
     def _compute_neighbor_deltas(self, mz_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        #after sorting peaks per spectrum! 
+        # after sorting peaks per spectrum
         delta_prev = np.zeros_like(mz_arr, dtype=np.float32)
         delta_next = np.zeros_like(mz_arr, dtype=np.float32)
 

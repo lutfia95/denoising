@@ -15,8 +15,6 @@ class SpectrumFeatureComputer:
         self.config = config
 
     def compute(self, record: SpectrumRecord) -> SpectrumFeatureSet:
-        record.validate()
-
         num_peaks = record.num_peaks if self.config.use_num_peaks else 0
         tic = record.tic if self.config.use_tic else 0.0
 

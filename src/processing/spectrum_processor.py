@@ -29,6 +29,7 @@ class SpectrumProcessor:
         self.fdr_weight_computer = fdr_weight_computer
 
     def process_record(self, record: SpectrumRecord) -> ProcessedSpectrum:
+        record.validate()
         processed_record, peak_features = self.peak_feature_computer.compute(record)
         spectrum_features = self.spectrum_feature_computer.compute(processed_record)
         fdr_weight = self.fdr_weight_computer.compute(processed_record.fdr)
@@ -42,9 +43,10 @@ class SpectrumProcessor:
 
     def process_dataframe(self, df: pd.DataFrame) -> list[ProcessedSpectrum]:
         processed: list[ProcessedSpectrum] = []
+        column_index = {name: idx for idx, name in enumerate(df.columns)}
 
-        for _, row in df.iterrows():
-            record = self.row_to_record(row)
+        for row in df.itertuples(index=False, name=None):
+            record = self.row_tuple_to_record(row, column_index)
             processed.append(self.process_record(record))
 
         return processed
@@ -72,6 +74,34 @@ class SpectrumProcessor:
             annotation_mask=annotation_mask,
             fdr=fdr,
             scan_id=row["ScanId"],
+        )
+
+    @staticmethod
+    def row_tuple_to_record(
+        row: tuple[object, ...],
+        column_index: dict[str, int],
+    ) -> SpectrumRecord:
+        annotation_mask = row[column_index["annotation_mask"]]
+        if annotation_mask is not None:
+            annotation_mask = SpectrumProcessor._to_bool_array(annotation_mask)
+
+        fdr = row[column_index["fdr"]]
+        if pd.isna(fdr):
+            fdr = None
+        else:
+            fdr = float(fdr)
+
+        return SpectrumRecord(
+            search_id=row[column_index["SearchID"]],
+            peak_list_file_name=str(row[column_index["PeakListFileName"]]),
+            scan=int(row[column_index["scan"]]),
+            mz_arr=SpectrumProcessor._to_float_array(row[column_index["mz_arr"]]),
+            int_arr=SpectrumProcessor._to_float_array(row[column_index["int_arr"]]),
+            charge=int(row[column_index["Charge"]]),
+            precursor_mz=float(row[column_index["exp m/z"]]),
+            annotation_mask=annotation_mask,
+            fdr=fdr,
+            scan_id=row[column_index["ScanId"]],
         )
 
     @staticmethod
