@@ -86,6 +86,7 @@ class PeakTransformerClassifier(nn.Module):
         # The first two peak features are m/z and log intensity in the current config.
         # Projecting them separately gives the encoder a lightweight positional/local cue
         # without requiring hard assumptions about a fixed peak count.
+        # peak_positional_projection is good for this case, https://medium.com/thedeephub/positional-encoding-explained-a-deep-dive-into-transformer-pe-65cfe8cfe10b
         self.peak_positional_projection: nn.Module | None = None
         if self.config.use_peak_positional_projection:
             self.peak_positional_projection = nn.Linear(2, self.config.d_model)

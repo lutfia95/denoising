@@ -85,6 +85,7 @@ def train_transformer(
     device: str | torch.device | None = None,
 ) -> dict[str, object]:
     _set_seed(config.training.seed)
+    print(f'[DEV] Setting seed with {config.training.seed}')
 
     output_dir = Path(config.output.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -95,13 +96,15 @@ def train_transformer(
         device_info = print_device_info(used_device)
         if config.output.device_verbose:
             print(device_info)
-
+        print(f'[DEV] Reading training data...')
         train_df = pd.read_parquet(config.data.train_path)
         val_df = pd.read_parquet(config.data.val_path)
         test_df = pd.read_parquet(config.data.test_path)
-
+        print(f'[DEV] Loaded train set with {len(train_df)} data points\n')
+        print(f'[DEV] Loaded test set with {len(test_df)} data points\n')
+        print(f'[DEV] Loaded val set with {len(val_df)} data points\n')
+        print(f'[DEV] Normalizing peak features...\n')
         normalizer = fit_feature_normalizer(train_df, config)
-
         train_dataset = MLPSpectrumDataset(train_df, config, normalizer, split_name="train")
         val_dataset = MLPSpectrumDataset(val_df, config, normalizer, split_name="val")
         test_dataset = MLPSpectrumDataset(test_df, config, normalizer, split_name="test")
@@ -134,11 +137,14 @@ def train_transformer(
 
         model = model.to(used_device)
         optimizer = _build_optimizer(model, config)
+        print(f"[DEV] Finished building optimizer: {optimizer}")
         pos_weight = (
             compute_pos_weight(train_df, config) if config.loss.use_pos_weight else None
         )
+        print(f"[DEV] Computed the positive weights only from training set: {pos_weight}")
         criterion = _build_loss(config, used_device, pos_weight=pos_weight)
-
+        print(f"[DEV] Computed the positive weights only from training set: {pos_weight}")
+        #exit()
         history: list[dict[str, float]] = []
         best_state_dict: dict[str, Tensor] | None = None
         best_epoch = -1

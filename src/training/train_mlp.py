@@ -678,6 +678,7 @@ def fit_feature_normalizer(
     config: TrainingConfig,
 ) -> FeatureNormalizer:
     peak_rows: list[np.ndarray] = []
+    print(f'[DEV-MLP] Features to normalise:\n {config.features.peak_feature_columns}')
     for col_name in config.features.peak_feature_columns:
         values = [np.asarray(v, dtype=np.float32) for v in train_df[col_name].tolist()]
         peak_rows.append(np.concatenate(values, axis=0))
