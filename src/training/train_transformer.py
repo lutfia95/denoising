@@ -16,12 +16,18 @@ from src.model.transformer import PeakTransformerClassifier
 from src.training.logging_utils import tee_output
 from src.training.train_mlp import (
     MLPSpectrumDataset,
+    _autocast_context,
     _build_loss,
+    _build_grad_scaler,
+    _build_loader_kwargs,
     _build_optimizer,
+    _configure_runtime,
     _is_improved,
+    _maybe_compile_model,
     _resolve_device,
     _set_seed,
     _to_jsonable,
+    _use_non_blocking_transfers,
     build_confusion_summary,
     compute_metrics,
     compute_pos_weight,
@@ -92,6 +98,7 @@ def train_transformer(
     log_path = output_dir / config.output.log_file_name
     with tee_output(log_path, enabled=config.output.enable_file_logging):
         print(f"[LOG] Writing training output to: {log_path}")
+        _configure_runtime(config)
         used_device = _resolve_device(device)
         device_info = print_device_info(used_device)
         if config.output.device_verbose:
@@ -109,7 +116,7 @@ def train_transformer(
         val_dataset = MLPSpectrumDataset(val_df, config, normalizer, split_name="val")
         test_dataset = MLPSpectrumDataset(test_df, config, normalizer, split_name="test")
 
-        loader_kwargs = _build_loader_kwargs(config.training.num_workers)
+        loader_kwargs = _build_loader_kwargs(config, used_device)
         train_loader = DataLoader(
             train_dataset,
             batch_size=config.training.batch_size,
@@ -136,6 +143,7 @@ def train_transformer(
         print("[DEV] Finished test loader!")
 
         model = model.to(used_device)
+        model = _maybe_compile_model(model, config, used_device)
         optimizer = _build_optimizer(model, config)
         print(f"[DEV] Finished building optimizer: {optimizer}")
         pos_weight = (
@@ -144,6 +152,7 @@ def train_transformer(
         print(f"[DEV] Computed the positive weights only from training set: {pos_weight}")
         criterion = _build_loss(config, used_device, pos_weight=pos_weight)
         print(f"[DEV] Computed the positive weights only from training set: {pos_weight}")
+        grad_scaler = _build_grad_scaler(config, used_device)
         #exit()
         history: list[dict[str, float]] = []
         best_state_dict: dict[str, Tensor] | None = None
@@ -164,6 +173,7 @@ def train_transformer(
                 config=config,
                 device=used_device,
                 training=True,
+                grad_scaler=grad_scaler,
             )
             val_metrics = run_one_epoch(
                 model=model,
@@ -173,6 +183,7 @@ def train_transformer(
                 config=config,
                 device=used_device,
                 training=False,
+                grad_scaler=None,
             )
 
             epoch_record = {"epoch": float(epoch)}
@@ -231,6 +242,7 @@ def train_transformer(
             criterion=criterion,
             config=config,
             device=used_device,
+            grad_scaler=None,
         )
         final_test_eval = evaluate_loader(
             model=model,
@@ -238,6 +250,7 @@ def train_transformer(
             criterion=criterion,
             config=config,
             device=used_device,
+            grad_scaler=None,
         )
 
         history_df = pd.DataFrame(history)
@@ -324,6 +337,7 @@ def run_one_epoch(
     config: TrainingConfig,
     device: torch.device,
     training: bool,
+    grad_scaler: torch.cuda.amp.GradScaler | None,
 ) -> dict[str, float]:
     result = _run_loader(
         model=model,
@@ -333,6 +347,7 @@ def run_one_epoch(
         config=config,
         device=device,
         training=training,
+        grad_scaler=grad_scaler,
     )
     return result["metrics"]
 
@@ -343,6 +358,7 @@ def evaluate_loader(
     criterion: nn.Module,
     config: TrainingConfig,
     device: torch.device,
+    grad_scaler: torch.cuda.amp.GradScaler | None = None,
 ) -> dict[str, object]:
     return _run_loader(
         model=model,
@@ -352,6 +368,7 @@ def evaluate_loader(
         config=config,
         device=device,
         training=False,
+        grad_scaler=grad_scaler,
     )
 
 
@@ -363,6 +380,7 @@ def _run_loader(
     config: TrainingConfig,
     device: torch.device,
     training: bool,
+    grad_scaler: torch.cuda.amp.GradScaler | None,
 ) -> dict[str, object]:
     if training:
         model.train()
@@ -376,21 +394,23 @@ def _run_loader(
     total_valid_peaks = 0
 
     for batch_idx, batch in enumerate(loader, start=1):
-        peak_features = batch["peak_features"].to(device)
-        spectrum_features = batch["spectrum_features"].to(device)
-        targets = batch["targets"].to(device)
-        weights = batch["weights"].to(device)
-        padding_mask = batch["padding_mask"].to(device)
+        non_blocking = _use_non_blocking_transfers(config, device)
+        peak_features = batch["peak_features"].to(device, non_blocking=non_blocking)
+        spectrum_features = batch["spectrum_features"].to(device, non_blocking=non_blocking)
+        targets = batch["targets"].to(device, non_blocking=non_blocking)
+        weights = batch["weights"].to(device, non_blocking=non_blocking)
+        padding_mask = batch["padding_mask"].to(device, non_blocking=non_blocking)
 
         valid_mask = ~padding_mask
 
         with torch.set_grad_enabled(training):
-            logits = model(
-                peak_features=peak_features,
-                spectrum_features=spectrum_features,
-                padding_mask=padding_mask,
-            )
-            loss_matrix = criterion(logits, targets)
+            with _autocast_context(config, device):
+                logits = model(
+                    peak_features=peak_features,
+                    spectrum_features=spectrum_features,
+                    padding_mask=padding_mask,
+                )
+                loss_matrix = criterion(logits, targets)
 
             if config.data.use_training_weights:
                 loss_matrix = loss_matrix * weights
@@ -403,13 +423,24 @@ def _run_loader(
             if training:
                 assert optimizer is not None
                 optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                if config.training.gradient_clip_norm > 0.0:
-                    nn.utils.clip_grad_norm_(
-                        model.parameters(),
-                        max_norm=config.training.gradient_clip_norm,
-                    )
-                optimizer.step()
+                if grad_scaler is not None and grad_scaler.is_enabled():
+                    grad_scaler.scale(loss).backward()
+                    if config.training.gradient_clip_norm > 0.0:
+                        grad_scaler.unscale_(optimizer)
+                        nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            max_norm=config.training.gradient_clip_norm,
+                        )
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                else:
+                    loss.backward()
+                    if config.training.gradient_clip_norm > 0.0:
+                        nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            max_norm=config.training.gradient_clip_norm,
+                        )
+                    optimizer.step()
 
         total_loss += float(loss.item()) * valid_count
         total_valid_peaks += valid_count
@@ -454,17 +485,6 @@ def _run_loader(
         "targets": targets_np,
         "spectrum_indices": spectrum_indices_np,
     }
-
-
-def _build_loader_kwargs(num_workers: int) -> dict[str, object]:
-    kwargs: dict[str, object] = {
-        "num_workers": num_workers,
-        "pin_memory": torch.cuda.is_available(),
-    }
-    if num_workers > 0:
-        kwargs["persistent_workers"] = True
-    return kwargs
-
 
 def _state_dict_to_cpu(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
     return {key: value.detach().cpu() for key, value in state_dict.items()}

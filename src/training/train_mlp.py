@@ -146,11 +146,25 @@ class MLPSpectrumDataset(Dataset):
         self.config = config
         self.normalizer = normalizer
         self.split_name = split_name
+        self._cached_samples: list[dict[str, np.ndarray | float | int]] | None = None
+
+        if self.config.training.cache_dataset_in_memory:
+            print(f"[DEV] Caching {self.split_name} dataset in memory...")
+            self._cached_samples = [self._build_sample(i) for i in range(len(self.df))]
+            print(
+                f"[DEV] Cached {len(self._cached_samples)} {self.split_name} samples in memory."
+            )
 
     def __len__(self) -> int:
         return int(len(self.df))
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray | float | int]:
+        if self._cached_samples is not None:
+            return self._cached_samples[idx]
+
+        return self._build_sample(idx)
+
+    def _build_sample(self, idx: int) -> dict[str, np.ndarray | float | int]:
         row = self.df.iloc[idx]
 
         peak_features = self._build_peak_feature_matrix(row)
@@ -297,6 +311,7 @@ def train_mlp(
     log_path = output_dir / config.output.log_file_name
     with tee_output(log_path, enabled=config.output.enable_file_logging):
         print(f"[LOG] Writing training output to: {log_path}")
+        _configure_runtime(config)
         device_verbose = config.output.device_verbose
         used_device = _resolve_device(device)
         device_info = print_device_info(used_device)
@@ -328,37 +343,41 @@ def train_mlp(
             split_name="test",
         )
 
+        loader_kwargs = _build_loader_kwargs(config, used_device)
+
         train_loader = DataLoader(
             train_dataset,
             batch_size=config.training.batch_size,
             shuffle=True,
-            num_workers=config.training.num_workers,
             collate_fn=mlp_collate_fn,
+            **loader_kwargs,
         )
         print("[DEV] Finished train loader!")
         val_loader = DataLoader(
             val_dataset,
             batch_size=config.training.batch_size,
             shuffle=False,
-            num_workers=config.training.num_workers,
             collate_fn=mlp_collate_fn,
+            **loader_kwargs,
         )
         print("[DEV] Finished val loader!")
         test_loader = DataLoader(
             test_dataset,
             batch_size=config.training.batch_size,
             shuffle=False,
-            num_workers=config.training.num_workers,
             collate_fn=mlp_collate_fn,
+            **loader_kwargs,
         )
         print("[DEV] Finished test loader!")
         model = model.to(used_device)
+        model = _maybe_compile_model(model, config, used_device)
 
         optimizer = _build_optimizer(model, config)
         pos_weight = (
             compute_pos_weight(train_df, config) if config.loss.use_pos_weight else None
         )
         criterion = _build_loss(config, used_device, pos_weight=pos_weight)
+        grad_scaler = _build_grad_scaler(config, used_device)
 
         history: list[dict[str, float]] = []
         best_state_dict: dict[str, Tensor] | None = None
@@ -378,6 +397,7 @@ def train_mlp(
                 config=config,
                 device=used_device,
                 training=True,
+                grad_scaler=grad_scaler,
             )
             val_metrics = run_one_epoch(
                 model=model,
@@ -387,6 +407,7 @@ def train_mlp(
                 config=config,
                 device=used_device,
                 training=False,
+                grad_scaler=None,
             )
 
             epoch_record = {"epoch": float(epoch)}
@@ -446,6 +467,7 @@ def train_mlp(
             criterion=criterion,
             config=config,
             device=used_device,
+            grad_scaler=None,
         )
         final_test_eval = evaluate_loader(
             model=model,
@@ -453,6 +475,7 @@ def train_mlp(
             criterion=criterion,
             config=config,
             device=used_device,
+            grad_scaler=None,
         )
 
         history_df = pd.DataFrame(history)
@@ -540,6 +563,7 @@ def run_one_epoch(
     config: TrainingConfig,
     device: torch.device,
     training: bool,
+    grad_scaler: torch.cuda.amp.GradScaler | None,
 ) -> dict[str, float]:
     result = _run_loader( #put model in training mode
         model=model,
@@ -549,6 +573,7 @@ def run_one_epoch(
         config=config,
         device=device,
         training=training,
+        grad_scaler=grad_scaler,
     )
     return result["metrics"]
 
@@ -559,6 +584,7 @@ def evaluate_loader(
     criterion: nn.Module,
     config: TrainingConfig,
     device: torch.device,
+    grad_scaler: torch.cuda.amp.GradScaler | None = None,
 ) -> dict[str, object]:
     return _run_loader(
         model=model,
@@ -568,6 +594,7 @@ def evaluate_loader(
         config=config,
         device=device,
         training=False,
+        grad_scaler=grad_scaler,
     )
 
 
@@ -579,6 +606,7 @@ def _run_loader(
     config: TrainingConfig,
     device: torch.device,
     training: bool,
+    grad_scaler: torch.cuda.amp.GradScaler | None,
 ) -> dict[str, object]:
     if training:
         model.train()
@@ -593,18 +621,20 @@ def _run_loader(
     total_peaks = 0
 
     for batch_idx, batch in enumerate(loader, start=1):
-        peak_features = batch["peak_features"].to(device)
-        spectrum_features = batch["spectrum_features"].to(device)
-        targets = batch["targets"].to(device)
-        weights = batch["weights"].to(device)
+        non_blocking = _use_non_blocking_transfers(config, device)
+        peak_features = batch["peak_features"].to(device, non_blocking=non_blocking)
+        spectrum_features = batch["spectrum_features"].to(device, non_blocking=non_blocking)
+        targets = batch["targets"].to(device, non_blocking=non_blocking)
+        weights = batch["weights"].to(device, non_blocking=non_blocking)
 
         with torch.set_grad_enabled(training):
-            logits = model(
-                peak_features=peak_features,
-                spectrum_features=spectrum_features,
-            )
+            with _autocast_context(config, device):
+                logits = model(
+                    peak_features=peak_features,
+                    spectrum_features=spectrum_features,
+                )
 
-            loss_vec = criterion(logits, targets)
+                loss_vec = criterion(logits, targets)
 
             if config.data.use_training_weights:
                 loss_vec = loss_vec * weights
@@ -614,15 +644,28 @@ def _run_loader(
             if training:
                 assert optimizer is not None
                 optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                if grad_scaler is not None and grad_scaler.is_enabled():
+                    grad_scaler.scale(loss).backward()
 
-                if config.training.gradient_clip_norm > 0.0:
-                    nn.utils.clip_grad_norm_(
-                        model.parameters(),
-                        max_norm=config.training.gradient_clip_norm,
-                    )
+                    if config.training.gradient_clip_norm > 0.0:
+                        grad_scaler.unscale_(optimizer)
+                        nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            max_norm=config.training.gradient_clip_norm,
+                        )
 
-                optimizer.step()
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                else:
+                    loss.backward()
+
+                    if config.training.gradient_clip_norm > 0.0:
+                        nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            max_norm=config.training.gradient_clip_norm,
+                        )
+
+                    optimizer.step()
 
         batch_size_peaks = int(targets.numel())
         total_loss += float(loss.item()) * batch_size_peaks
@@ -1009,11 +1052,102 @@ def _build_loss(
     )
 
 
+def _configure_runtime(config: TrainingConfig) -> None:
+    cpu_threads = config.training.cpu_num_threads
+    if cpu_threads is not None and cpu_threads > 0:
+        torch.set_num_threads(cpu_threads)
+        print(f"[DEV] torch.set_num_threads({cpu_threads})")
+
+    interop_threads = config.training.cpu_num_interop_threads
+    if interop_threads is not None and interop_threads > 0:
+        try:
+            torch.set_num_interop_threads(interop_threads)
+            print(f"[DEV] torch.set_num_interop_threads({interop_threads})")
+        except RuntimeError as exc:
+            print(f"[DEV] Skipping torch.set_num_interop_threads: {exc}")
+
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+
+
+def _worker_init_fn(worker_id: int) -> None:
+    torch.set_num_threads(1)
+
+
+def _build_loader_kwargs(
+    config: TrainingConfig,
+    device: torch.device,
+) -> dict[str, object]:
+    pin_memory = config.training.dataloader_pin_memory
+    if pin_memory is None:
+        pin_memory = device.type == "cuda"
+
+    kwargs: dict[str, object] = {
+        "num_workers": config.training.num_workers,
+        "pin_memory": pin_memory,
+    }
+    if config.training.num_workers > 0:
+        kwargs["persistent_workers"] = config.training.dataloader_persistent_workers
+        kwargs["prefetch_factor"] = config.training.dataloader_prefetch_factor
+        kwargs["worker_init_fn"] = _worker_init_fn
+    return kwargs
+
+
+def _use_amp(config: TrainingConfig, device: torch.device) -> bool:
+    return bool(config.training.enable_amp and device.type == "cuda")
+
+
+def _autocast_context(config: TrainingConfig, device: torch.device):
+    return torch.autocast(
+        device_type=device.type,
+        dtype=torch.float16,
+        enabled=_use_amp(config, device),
+    )
+
+
+def _build_grad_scaler(
+    config: TrainingConfig,
+    device: torch.device,
+) -> torch.cuda.amp.GradScaler | None:
+    if not _use_amp(config, device):
+        return None
+    return torch.cuda.amp.GradScaler(enabled=True)
+
+
+def _maybe_compile_model(
+    model: MLPPeakClassifier,
+    config: TrainingConfig,
+    device: torch.device,
+) -> MLPPeakClassifier:
+    if not config.training.compile_model or device.type not in {"cuda", "cpu"}:
+        return model
+    compile_fn = getattr(torch, "compile", None)
+    if compile_fn is None:
+        return model
+
+    try:
+        compiled_model = compile_fn(model)
+        print("[DEV] Enabled torch.compile for model.")
+        return compiled_model
+    except Exception as exc:
+        print(f"[DEV] torch.compile skipped: {exc}")
+        return model
+
+
+def _use_non_blocking_transfers(config: TrainingConfig, device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    pin_memory = config.training.dataloader_pin_memory
+    return True if pin_memory is None else bool(pin_memory)
+
+
 def _resolve_device(device: str | torch.device | None) -> torch.device:
     if device is not None:
         return torch.device(device)
     if torch.cuda.is_available():
         return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
     return torch.device("cpu")
 
 

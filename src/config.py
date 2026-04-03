@@ -63,6 +63,14 @@ class TrainingLoopConfig:
     batch_size: int
     num_workers: int
     max_epochs: int
+    cpu_num_threads: int | None
+    cpu_num_interop_threads: int | None
+    dataloader_prefetch_factor: int
+    dataloader_persistent_workers: bool
+    dataloader_pin_memory: bool | None
+    enable_amp: bool
+    compile_model: bool
+    cache_dataset_in_memory: bool
     optimizer: OptimizerConfig
     scheduler: SchedulerConfig
     gradient_clip_norm: float
@@ -238,6 +246,30 @@ def load_training_config(config_path: str | Path) -> TrainingConfig:
         batch_size=int(training_cfg.get("batch_size", 32)),
         num_workers=int(training_cfg.get("num_workers", 0)),
         max_epochs=int(training_cfg.get("max_epochs", 50)),
+        cpu_num_threads=(
+            None
+            if training_cfg.get("cpu_num_threads", None) is None
+            else int(training_cfg.get("cpu_num_threads"))
+        ),
+        cpu_num_interop_threads=(
+            None
+            if training_cfg.get("cpu_num_interop_threads", None) is None
+            else int(training_cfg.get("cpu_num_interop_threads"))
+        ),
+        dataloader_prefetch_factor=int(training_cfg.get("dataloader_prefetch_factor", 4)),
+        dataloader_persistent_workers=bool(
+            training_cfg.get("dataloader_persistent_workers", True)
+        ),
+        dataloader_pin_memory=(
+            None
+            if training_cfg.get("dataloader_pin_memory", None) is None
+            else bool(training_cfg.get("dataloader_pin_memory"))
+        ),
+        enable_amp=bool(training_cfg.get("enable_amp", True)),
+        compile_model=bool(training_cfg.get("compile_model", True)),
+        cache_dataset_in_memory=bool(
+            training_cfg.get("cache_dataset_in_memory", True)
+        ),
         optimizer=OptimizerConfig(
             name=str(optimizer_cfg.get("name", "adamw")),
             learning_rate=float(optimizer_cfg.get("learning_rate", 1.0e-3)),
@@ -383,6 +415,30 @@ def load_transformer_training_config(config_path: str | Path) -> TrainingConfig:
         batch_size=int(training_cfg.get("batch_size", 16)),
         num_workers=int(training_cfg.get("num_workers", 0)),
         max_epochs=int(training_cfg.get("max_epochs", 50)),
+        cpu_num_threads=(
+            None
+            if training_cfg.get("cpu_num_threads", None) is None
+            else int(training_cfg.get("cpu_num_threads"))
+        ),
+        cpu_num_interop_threads=(
+            None
+            if training_cfg.get("cpu_num_interop_threads", None) is None
+            else int(training_cfg.get("cpu_num_interop_threads"))
+        ),
+        dataloader_prefetch_factor=int(training_cfg.get("dataloader_prefetch_factor", 4)),
+        dataloader_persistent_workers=bool(
+            training_cfg.get("dataloader_persistent_workers", True)
+        ),
+        dataloader_pin_memory=(
+            None
+            if training_cfg.get("dataloader_pin_memory", None) is None
+            else bool(training_cfg.get("dataloader_pin_memory"))
+        ),
+        enable_amp=bool(training_cfg.get("enable_amp", True)),
+        compile_model=bool(training_cfg.get("compile_model", True)),
+        cache_dataset_in_memory=bool(
+            training_cfg.get("cache_dataset_in_memory", True)
+        ),
         optimizer=OptimizerConfig(
             name=str(optimizer_cfg.get("name", "adamw")),
             learning_rate=float(optimizer_cfg.get("learning_rate", 3.0e-4)),
