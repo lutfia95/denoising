@@ -1,0 +1,84 @@
+data:
+  train_path: "../data/splits/train.parquet"
+  val_path: "../data/splits/val.parquet"
+  test_path: "../data/splits/test.parquet"
+
+  target_column: "annotation_mask" # per-peak binary labels after flattening each spectrum into peak rows
+  use_training_weights: false # optionally repeat a spectrum weight onto each peak row for AutoGluon
+  weight_column: "weight"
+
+output:
+  output_dir: "../outputs/autogluon_peak_baseline"
+  predictor_subdir: "autogluon_predictor"
+  unique_predictor_subdir: true # create a new predictor directory each run to avoid "Learner is already fit"
+  save_metrics_summary: true
+  save_confusion_matrices: true
+  save_predictions: true
+  save_flattened_tables: false # can become very large; enable only when you need to inspect the flat peak table
+  save_fit_summary: true
+  enable_file_logging: true
+  log_file_name: "training.log"
+
+features:
+  peak_feature_columns:
+    - "peak_feature_mz"
+    - "peak_feature_log_intensity"
+    - "peak_feature_relative_intensity"
+    - "peak_feature_mz_over_precursor"
+    - "peak_feature_delta_to_precursor"
+    - "peak_feature_delta_prev"
+    - "peak_feature_delta_next"
+
+  spectrum_feature_columns:
+    - "Charge"
+    - "exp m/z"
+    - "num_peaks"
+    - "tic"
+
+  use_raw_peak_mz: true
+  raw_peak_mz_column: "mz_arr"
+  use_raw_peak_intensity: true
+  raw_peak_intensity_column: "int_arr"
+  sort_raw_peak_inputs_by_mz: true
+  broadcast_spectrum_features_to_peaks: false
+  normalize_peak_features: true
+  normalize_spectrum_features: true
+  normalization_fit_split: "train"
+
+autogluon:
+  label: "annotation_mask"
+  problem_type: "binary"
+  eval_metric: "average_precision" # good fit for imbalanced signal-vs-noise prediction
+  presets: "high_quality" # strong baseline without the very large cost of best_quality
+  time_limit: 14400 # 4h default budget for a serious baseline on a large table
+  verbosity: 2
+  positive_class: 1
+  sample_weight_column: null
+  weight_evaluation: false
+  dynamic_stacking: false # avoid expensive DyStack / Ray side work unless you really need it
+  num_stack_levels: 1
+  use_bag_holdout: true # valid when tuning_data is passed alongside bagging
+  fit_weighted_ensemble: true
+  save_bag_folds: true
+  save_leaderboard: true
+  save_feature_importance: true
+  feature_importance_subsample_size: 50000
+  feature_importance_num_shuffle_sets: 5
+  feature_importance_time_limit: 600
+
+evaluation:
+  primary_metric: "pr_auc"
+  threshold_for_binary_metrics: 0.5
+
+  report_metrics:
+    - "pr_auc"
+    - "roc_auc"
+    - "f1"
+    - "mcc"
+    - "precision"
+    - "recall"
+
+  retained_peak_fractions:
+    - 0.3
+    - 0.5
+    - 0.7
