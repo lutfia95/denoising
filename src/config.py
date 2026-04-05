@@ -124,6 +124,52 @@ class OutputConfig:
     enable_file_logging: bool
     log_file_name: str
 
+
+@dataclass(slots=True)
+class AutoGluonConfig:
+    label: str
+    problem_type: str
+    eval_metric: str
+    presets: str
+    time_limit: int | None
+    verbosity: int
+    positive_class: int | None
+    sample_weight_column: str | None
+    weight_evaluation: bool
+    save_leaderboard: bool
+    save_feature_importance: bool
+    feature_importance_subsample_size: int | None
+    feature_importance_num_shuffle_sets: int | None
+    feature_importance_time_limit: int | None
+    dynamic_stacking: bool
+    num_stack_levels: int
+    use_bag_holdout: bool
+    fit_weighted_ensemble: bool
+    save_bag_folds: bool
+
+
+@dataclass(slots=True)
+class AutoGluonOutputConfig:
+    output_dir: str
+    predictor_subdir: str | None
+    unique_predictor_subdir: bool
+    save_metrics_summary: bool
+    save_confusion_matrices: bool
+    save_predictions: bool
+    save_flattened_tables: bool
+    save_fit_summary: bool
+    enable_file_logging: bool
+    log_file_name: str
+
+
+@dataclass(slots=True)
+class AutoGluonTrainingConfig:
+    data: DataConfig
+    features: FeatureSelectionConfig
+    evaluation: EvaluationConfig
+    autogluon: AutoGluonConfig
+    output: AutoGluonOutputConfig
+
 def load_config(config_path: str | Path) -> AppConfig:
     path = Path(config_path)
     with path.open("r", encoding="utf-8") as handle:
@@ -500,5 +546,143 @@ def load_transformer_training_config(config_path: str | Path) -> TrainingConfig:
         loss=loss,
         early_stopping=early_stopping,
         evaluation=evaluation,
+        output=output,
+    )
+
+
+def load_autogluon_training_config(
+    config_path: str | Path,
+) -> AutoGluonTrainingConfig:
+    path = Path(config_path)
+    with path.open("r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+
+    data_cfg = raw.get("data", {})
+    output_cfg = raw.get("output", {})
+    features_cfg = raw.get("features", {})
+    autogluon_cfg = raw.get("autogluon", {})
+    eval_cfg = raw.get("evaluation", {})
+
+    data = DataConfig(
+        train_path=str(data_cfg.get("train_path", "data/splits/train.parquet")),
+        val_path=str(data_cfg.get("val_path", "data/splits/val.parquet")),
+        test_path=str(data_cfg.get("test_path", "data/splits/test.parquet")),
+        target_column=str(data_cfg.get("target_column", "annotation_mask")),
+        use_training_weights=bool(data_cfg.get("use_training_weights", False)),
+        weight_column=str(data_cfg.get("weight_column", "weight")),
+    )
+
+    features = FeatureSelectionConfig(
+        peak_feature_columns=list(features_cfg.get("peak_feature_columns", [])),
+        spectrum_feature_columns=list(features_cfg.get("spectrum_feature_columns", [])),
+        use_raw_peak_mz=bool(features_cfg.get("use_raw_peak_mz", False)),
+        raw_peak_mz_column=str(features_cfg.get("raw_peak_mz_column", "mz_arr")),
+        use_raw_peak_intensity=bool(features_cfg.get("use_raw_peak_intensity", False)),
+        raw_peak_intensity_column=str(
+            features_cfg.get("raw_peak_intensity_column", "int_arr")
+        ),
+        sort_raw_peak_inputs_by_mz=bool(
+            features_cfg.get("sort_raw_peak_inputs_by_mz", True)
+        ),
+        broadcast_spectrum_features_to_peaks=bool(
+            features_cfg.get("broadcast_spectrum_features_to_peaks", False)
+        ),
+        normalize_peak_features=bool(features_cfg.get("normalize_peak_features", True)),
+        normalize_spectrum_features=bool(
+            features_cfg.get("normalize_spectrum_features", True)
+        ),
+        normalization_fit_split=str(
+            features_cfg.get("normalization_fit_split", "train")
+        ),
+    )
+
+    evaluation = EvaluationConfig(
+        primary_metric=str(eval_cfg.get("primary_metric", "pr_auc")),
+        threshold_for_binary_metrics=float(
+            eval_cfg.get("threshold_for_binary_metrics", 0.5)
+        ),
+        report_metrics=list(
+            eval_cfg.get(
+                "report_metrics",
+                ["pr_auc", "roc_auc", "f1", "mcc", "precision", "recall"],
+            )
+        ),
+        retained_peak_fractions=[
+            float(x) for x in eval_cfg.get("retained_peak_fractions", [0.3, 0.5, 0.7])
+        ],
+    )
+
+    autogluon = AutoGluonConfig(
+        label=str(autogluon_cfg.get("label", data.target_column)),
+        problem_type=str(autogluon_cfg.get("problem_type", "binary")),
+        eval_metric=str(autogluon_cfg.get("eval_metric", "average_precision")),
+        presets=str(autogluon_cfg.get("presets", "high_quality")),
+        time_limit=(
+            None
+            if autogluon_cfg.get("time_limit", None) is None
+            else int(autogluon_cfg.get("time_limit"))
+        ),
+        verbosity=int(autogluon_cfg.get("verbosity", 2)),
+        positive_class=(
+            None
+            if autogluon_cfg.get("positive_class", None) is None
+            else int(autogluon_cfg.get("positive_class"))
+        ),
+        sample_weight_column=(
+            None
+            if autogluon_cfg.get("sample_weight_column", None) is None
+            else str(autogluon_cfg.get("sample_weight_column"))
+        ),
+        weight_evaluation=bool(autogluon_cfg.get("weight_evaluation", False)),
+        save_leaderboard=bool(autogluon_cfg.get("save_leaderboard", True)),
+        save_feature_importance=bool(
+            autogluon_cfg.get("save_feature_importance", True)
+        ),
+        feature_importance_subsample_size=(
+            None
+            if autogluon_cfg.get("feature_importance_subsample_size", None) is None
+            else int(autogluon_cfg.get("feature_importance_subsample_size"))
+        ),
+        feature_importance_num_shuffle_sets=(
+            None
+            if autogluon_cfg.get("feature_importance_num_shuffle_sets", None) is None
+            else int(autogluon_cfg.get("feature_importance_num_shuffle_sets"))
+        ),
+        feature_importance_time_limit=(
+            None
+            if autogluon_cfg.get("feature_importance_time_limit", None) is None
+            else int(autogluon_cfg.get("feature_importance_time_limit"))
+        ),
+        dynamic_stacking=bool(autogluon_cfg.get("dynamic_stacking", False)),
+        num_stack_levels=int(autogluon_cfg.get("num_stack_levels", 1)),
+        use_bag_holdout=bool(autogluon_cfg.get("use_bag_holdout", True)),
+        fit_weighted_ensemble=bool(autogluon_cfg.get("fit_weighted_ensemble", True)),
+        save_bag_folds=bool(autogluon_cfg.get("save_bag_folds", True)),
+    )
+
+    output = AutoGluonOutputConfig(
+        output_dir=str(output_cfg.get("output_dir", "outputs/autogluon_baseline")),
+        predictor_subdir=(
+            None
+            if output_cfg.get("predictor_subdir", None) is None
+            else str(output_cfg.get("predictor_subdir"))
+        ),
+        unique_predictor_subdir=bool(
+            output_cfg.get("unique_predictor_subdir", True)
+        ),
+        save_metrics_summary=bool(output_cfg.get("save_metrics_summary", True)),
+        save_confusion_matrices=bool(output_cfg.get("save_confusion_matrices", True)),
+        save_predictions=bool(output_cfg.get("save_predictions", True)),
+        save_flattened_tables=bool(output_cfg.get("save_flattened_tables", False)),
+        save_fit_summary=bool(output_cfg.get("save_fit_summary", True)),
+        enable_file_logging=bool(output_cfg.get("enable_file_logging", True)),
+        log_file_name=str(output_cfg.get("log_file_name", "training.log")),
+    )
+
+    return AutoGluonTrainingConfig(
+        data=data,
+        features=features,
+        evaluation=evaluation,
+        autogluon=autogluon,
         output=output,
     )
