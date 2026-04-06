@@ -71,6 +71,8 @@ class TrainingLoopConfig:
     enable_amp: bool
     compile_model: bool
     cache_dataset_in_memory: bool
+    save_latest_checkpoint: bool
+    resume_from_checkpoint: str | None
     optimizer: OptimizerConfig
     scheduler: SchedulerConfig
     gradient_clip_norm: float
@@ -316,6 +318,14 @@ def load_training_config(config_path: str | Path) -> TrainingConfig:
         cache_dataset_in_memory=bool(
             training_cfg.get("cache_dataset_in_memory", True)
         ),
+        save_latest_checkpoint=bool(
+            training_cfg.get("save_latest_checkpoint", True)
+        ),
+        resume_from_checkpoint=(
+            None
+            if training_cfg.get("resume_from_checkpoint", None) is None
+            else str(training_cfg.get("resume_from_checkpoint"))
+        ),
         optimizer=OptimizerConfig(
             name=str(optimizer_cfg.get("name", "adamw")),
             learning_rate=float(optimizer_cfg.get("learning_rate", 1.0e-3)),
@@ -484,6 +494,14 @@ def load_transformer_training_config(config_path: str | Path) -> TrainingConfig:
         compile_model=bool(training_cfg.get("compile_model", True)),
         cache_dataset_in_memory=bool(
             training_cfg.get("cache_dataset_in_memory", True)
+        ),
+        save_latest_checkpoint=bool(
+            training_cfg.get("save_latest_checkpoint", True)
+        ),
+        resume_from_checkpoint=(
+            None
+            if training_cfg.get("resume_from_checkpoint", None) is None
+            else str(training_cfg.get("resume_from_checkpoint"))
         ),
         optimizer=OptimizerConfig(
             name=str(optimizer_cfg.get("name", "adamw")),

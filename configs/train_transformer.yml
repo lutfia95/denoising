@@ -1,117 +1,119 @@
 data:
-  train_path: "../data/splits/train.parquet"
-  val_path: "../data/splits/val.parquet"
-  test_path: "../data/splits/test.parquet"
+  train_path: "../data/splits/train.parquet" # Parquet file used for model fitting.
+  val_path: "../data/splits/val.parquet" # Parquet file used for validation during training.
+  test_path: "../data/splits/test.parquet" # Parquet file used for final held-out evaluation.
   #train_path: "../data/demo/train_ten_rows.parquet"
   #val_path: "../data/demo/val_ten_rows.parquet"
   #test_path: "../data/demo/test_ten_rows.parquet"
 
-  target_column: "annotation_mask"
-  use_training_weights: false
-  weight_column: "weight"
+  target_column: "annotation_mask" # Column containing the per-peak binary targets.
+  use_training_weights: false # Enables per-example weighting in the loss if available.
+  weight_column: "weight" # Column name to read sample weights from when weighting is enabled.
 
 output:
-  output_dir: "../outputs/transformer_peak_classifier"
-  save_best_model: true
-  save_epoch_history: true
-  save_metrics_summary: true
-  save_plots: true
-  save_confusion_matrices: true
-  device_verbose: true
-  enable_file_logging: true
-  log_file_name: "training.log"
+  output_dir: "../outputs/transformer_peak_classifier" # Directory where all training artifacts are written.
+  save_best_model: true # Writes the best validation checkpoint to disk.
+  save_epoch_history: true # Saves per-epoch metrics to a CSV file.
+  save_metrics_summary: true # Saves the final validation and test metrics summary as JSON.
+  save_plots: true # Generates training curve plots after training finishes.
+  save_confusion_matrices: true # Saves confusion-matrix artifacts for validation and test sets.
+  device_verbose: true # Prints detailed device and accelerator information at startup.
+  enable_file_logging: true # Mirrors console logs into a file in the output directory.
+  log_file_name: "training.log" # File name used for the persisted training log.
 
 features:
   peak_feature_columns:
-    - "peak_feature_mz"
-    - "peak_feature_log_intensity"
-    - "peak_feature_relative_intensity"
-    - "peak_feature_mz_over_precursor"
-    - "peak_feature_delta_to_precursor"
-    - "peak_feature_delta_prev"
-    - "peak_feature_delta_next"
+    - "peak_feature_mz" # Peak m/z-based engineered feature.
+    - "peak_feature_log_intensity" # Log-scaled peak intensity feature.
+    - "peak_feature_relative_intensity" # Intensity normalized relative to the spectrum.
+    - "peak_feature_mz_over_precursor" # Ratio between peak m/z and precursor m/z.
+    - "peak_feature_delta_to_precursor" # Difference between peak m/z and precursor m/z.
+    - "peak_feature_delta_prev" # Distance from the previous peak in the ordered spectrum.
+    - "peak_feature_delta_next" # Distance to the next peak in the ordered spectrum.
 
   spectrum_feature_columns:
-    - "Charge"
-    - "exp m/z"
-    - "num_peaks"
-    - "tic"
+    - "Charge" # Precursor charge state feature.
+    - "exp m/z" # Experimental precursor m/z feature.
+    - "num_peaks" # Total number of peaks in the spectrum.
+    - "tic" # Total ion current summary feature.
 
-  use_raw_peak_mz: true
-  raw_peak_mz_column: "mz_arr"
-  use_raw_peak_intensity: true
-  raw_peak_intensity_column: "int_arr"
-  sort_raw_peak_inputs_by_mz: true
-  broadcast_spectrum_features_to_peaks: false
-  normalize_peak_features: true
-  normalize_spectrum_features: true
-  normalization_fit_split: "train"
+  use_raw_peak_mz: true # Appends the raw m/z sequence as an additional peak input column.
+  raw_peak_mz_column: "mz_arr" # Source column holding the raw m/z array.
+  use_raw_peak_intensity: true # Appends the raw intensity sequence as an additional peak input column.
+  raw_peak_intensity_column: "int_arr" # Source column holding the raw intensity array.
+  sort_raw_peak_inputs_by_mz: true # Sorts raw peak arrays by m/z before building tensors.
+  broadcast_spectrum_features_to_peaks: false # Kept for config compatibility but unused by the transformer path.
+  normalize_peak_features: true # Standardizes peak-level input features using train-set statistics.
+  normalize_spectrum_features: true # Standardizes spectrum-level input features using train-set statistics.
+  normalization_fit_split: "train" # Split used to fit feature normalization statistics.
 
 model:
-  name: "transformer_peak_classifier"
+  name: "transformer_peak_classifier" # Identifier for this model family.
 
   transformer:
-    d_model: 96
-    num_heads: 4
-    num_layers: 3
-    ff_multiplier: 4.0
-    dropout: 0.1
-    activation: "gelu"
-    use_layer_norm: true
-    output_dim: 1
-    use_spectrum_context_gating: true
-    use_peak_positional_projection: true
+    d_model: 96 # Hidden width used for transformer token embeddings.
+    num_heads: 4 # Number of attention heads in each encoder block.
+    num_layers: 3 # Number of stacked transformer encoder blocks.
+    ff_multiplier: 4.0 # Expansion factor for the feed-forward hidden layer.
+    dropout: 0.1 # Dropout probability applied inside the transformer.
+    activation: "gelu" # Nonlinearity used in the feed-forward network and head.
+    use_layer_norm: true # Enables layer normalization inside the encoder blocks.
+    output_dim: 1 # Number of logits produced per peak.
+    use_spectrum_context_gating: true # Gates peak tokens with spectrum-level context.
+    use_peak_positional_projection: true # Projects the first two peak features as a lightweight positional cue.
 
 training:
-  seed: 42
-  batch_size: 32
-  num_workers: 16
-  max_epochs: 50
-  cpu_num_threads: 8
-  cpu_num_interop_threads: 2
-  dataloader_prefetch_factor: 4
-  dataloader_persistent_workers: true
-  dataloader_pin_memory: true
-  enable_amp: true
-  compile_model: true
-  cache_dataset_in_memory: true
+  seed: 42 # Global random seed for reproducible training behavior.
+  batch_size: 8 # Number of spectra per batch before peak padding is applied.
+  num_workers: 10 # Number of dataloader worker processes.
+  max_epochs: 50 # Maximum number of training epochs to run.
+  cpu_num_threads: 8 # CPU compute threads used by PyTorch kernels where applicable.
+  cpu_num_interop_threads: 2 # CPU inter-op threads used to schedule parallel work.
+  dataloader_prefetch_factor: 4 # Number of batches each worker preloads ahead of time.
+  dataloader_persistent_workers: true # Keeps dataloader workers alive across epochs.
+  dataloader_pin_memory: true # Pins host memory to speed CPU-to-GPU transfers.
+  enable_amp: true # Enables automatic mixed precision on CUDA.
+  compile_model: false # Disables torch.compile to reduce runtime memory risk.
+  cache_dataset_in_memory: true # Precomputes dataset samples and keeps them in RAM.
+  save_latest_checkpoint: true # Saves a resumable checkpoint after each epoch.
+  resume_from_checkpoint: null # Set to "auto" or a checkpoint path to continue after interruption.
 
   optimizer:
-    name: "adamw"
-    learning_rate: 0.0003
-    weight_decay: 0.0001
+    name: "adamw" # Optimizer used to update model parameters.
+    learning_rate: 0.0003 # Base learning rate passed to the optimizer.
+    weight_decay: 0.0001 # L2-style parameter decay applied by the optimizer.
 
   scheduler:
-    enabled: false
+    enabled: false # Placeholder switch for learning-rate scheduling support.
 
-  gradient_clip_norm: 1.0
+  gradient_clip_norm: 1.0 # Max gradient norm used for clipping before optimizer step.
 
 loss:
-  name: "bce_with_logits"
-  use_pos_weight: true # this is using the fdr value! see train_mlp.py in 174 then 610 then in train_transofrmer.py 334
-  pos_weight: null
-  reduction: "none"
+  name: "bce_with_logits" # Per-peak binary classification loss function.
+  use_pos_weight: true # Uses a positive-class weight estimated from the training split.
+  pos_weight: null # Manual positive-class weight override; null means auto-compute.
+  reduction: "none" # Keeps unreduced loss values so padding can be masked out manually.
 
 early_stopping:
-  enabled: true
-  monitor: "val_pr_auc"
-  mode: "max"
-  patience: 7
-  min_delta: 0.0001
+  enabled: true # Stops training early when the monitored metric stops improving.
+  monitor: "val_pr_auc" # Validation metric used to select the best epoch.
+  mode: "max" # Improvement direction for the monitored metric.
+  patience: 7 # Number of unimproved epochs tolerated before stopping.
+  min_delta: 0.0001 # Minimum metric change required to count as an improvement.
 
 evaluation:
-  primary_metric: "pr_auc"
-  threshold_for_binary_metrics: 0.5
+  primary_metric: "pr_auc" # Main evaluation metric emphasized in reports.
+  threshold_for_binary_metrics: 0.5 # Probability cutoff used for discrete binary metrics.
 
   report_metrics:
-    - "pr_auc"
-    - "roc_auc"
-    - "f1"
-    - "mcc"
-    - "precision"
-    - "recall"
+    - "pr_auc" # Precision-recall area under the curve.
+    - "roc_auc" # Receiver operating characteristic area under the curve.
+    - "f1" # Harmonic mean of precision and recall.
+    - "mcc" # Matthews correlation coefficient.
+    - "precision" # Positive predictive value at the chosen threshold.
+    - "recall" # True positive rate at the chosen threshold.
 
   retained_peak_fractions:
-    - 0.3
-    - 0.5
-    - 0.7
+    - 0.3 # Fraction used for retained-peak style analysis.
+    - 0.5 # Fraction used for retained-peak style analysis.
+    - 0.7 # Fraction used for retained-peak style analysis.

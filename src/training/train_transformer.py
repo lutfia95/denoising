@@ -15,6 +15,7 @@ from src.config import TrainingConfig
 from src.model.transformer import PeakTransformerClassifier
 from src.training.logging_utils import tee_output
 from src.training.train_mlp import (
+    FeatureNormalizer,
     MLPSpectrumDataset,
     _autocast_context,
     _build_loss,
@@ -96,6 +97,7 @@ def train_transformer(
     output_dir = Path(config.output.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / config.output.log_file_name
+    latest_checkpoint_path = output_dir / "last_checkpoint.pt"
     with tee_output(log_path, enabled=config.output.enable_file_logging):
         print(f"[LOG] Writing training output to: {log_path}")
         _configure_runtime(config)
@@ -112,9 +114,15 @@ def train_transformer(
         print(f'[DEV] Loaded val set with {len(val_df)} data points\n')
         print(f'[DEV] Normalizing peak features...\n')
         normalizer = fit_feature_normalizer(train_df, config)
-        train_dataset = MLPSpectrumDataset(train_df, config, normalizer, split_name="train")
-        val_dataset = MLPSpectrumDataset(val_df, config, normalizer, split_name="val")
-        test_dataset = MLPSpectrumDataset(test_df, config, normalizer, split_name="test")
+        train_dataset = MLPSpectrumDataset(
+            train_df, config, normalizer, split_name="train"
+        )
+        val_dataset = MLPSpectrumDataset(
+            val_df, config, normalizer, split_name="val"
+        )
+        test_dataset = MLPSpectrumDataset(
+            test_df, config, normalizer, split_name="test"
+        )
 
         loader_kwargs = _build_loader_kwargs(config, used_device)
         train_loader = DataLoader(
@@ -143,6 +151,22 @@ def train_transformer(
         print("[DEV] Finished test loader!")
 
         model = model.to(used_device)
+        resume_checkpoint = _resolve_resume_checkpoint(
+            config=config,
+            output_dir=output_dir,
+            default_checkpoint_path=latest_checkpoint_path,
+        )
+        resume_state: dict[str, object] | None = None
+        if resume_checkpoint is not None:
+            print(f"[DEV] Resuming transformer training from: {resume_checkpoint}")
+            resume_state = torch.load(resume_checkpoint, map_location="cpu")
+            checkpoint_model_state = resume_state.get("model_state_dict")
+            if not isinstance(checkpoint_model_state, dict):
+                raise ValueError(
+                    f"Checkpoint {resume_checkpoint} is missing model_state_dict"
+                )
+            model.load_state_dict(checkpoint_model_state)
+
         model = _maybe_compile_model(model, config, used_device)
         optimizer = _build_optimizer(model, config)
         print(f"[DEV] Finished building optimizer: {optimizer}")
@@ -153,18 +177,60 @@ def train_transformer(
         criterion = _build_loss(config, used_device, pos_weight=pos_weight)
         print(f"[DEV] Computed the positive weights only from training set: {pos_weight}")
         grad_scaler = _build_grad_scaler(config, used_device)
-        #exit()
         history: list[dict[str, float]] = []
         best_state_dict: dict[str, Tensor] | None = None
         best_epoch = -1
         best_score = -np.inf if config.early_stopping.mode == "max" else np.inf
         bad_epochs = 0
+        start_epoch = 1
+
+        if resume_state is not None:
+            checkpoint_optimizer_state = resume_state.get("optimizer_state_dict")
+            if isinstance(checkpoint_optimizer_state, dict):
+                optimizer.load_state_dict(checkpoint_optimizer_state)
+
+            checkpoint_grad_scaler_state = resume_state.get("grad_scaler_state_dict")
+            if (
+                grad_scaler is not None
+                and isinstance(checkpoint_grad_scaler_state, dict)
+            ):
+                grad_scaler.load_state_dict(checkpoint_grad_scaler_state)
+
+            checkpoint_history = resume_state.get("history", [])
+            if isinstance(checkpoint_history, list):
+                history = checkpoint_history
+
+            checkpoint_best_state = resume_state.get("best_state_dict")
+            if isinstance(checkpoint_best_state, dict):
+                best_state_dict = checkpoint_best_state
+
+            checkpoint_best_epoch = resume_state.get("best_epoch")
+            if checkpoint_best_epoch is not None:
+                best_epoch = int(checkpoint_best_epoch)
+
+            checkpoint_best_score = resume_state.get("best_score")
+            if checkpoint_best_score is not None:
+                best_score = float(checkpoint_best_score)
+
+            checkpoint_bad_epochs = resume_state.get("bad_epochs")
+            if checkpoint_bad_epochs is not None:
+                bad_epochs = int(checkpoint_bad_epochs)
+
+            checkpoint_epoch = resume_state.get("epoch")
+            if checkpoint_epoch is not None:
+                start_epoch = int(checkpoint_epoch) + 1
+
+            print(
+                f"[DEV] Resume state restored: start_epoch={start_epoch}, "
+                f"best_epoch={best_epoch}, best_score={best_score:.6f}, "
+                f"history_rows={len(history)}"
+            )
 
         monitor_name = config.early_stopping.monitor.removeprefix("val_")
         print(f"[DEV] Monitor Name: {monitor_name}")
         print(f"[DEV] Pos weight: {pos_weight}")
 
-        for epoch in range(1, config.training.max_epochs + 1):
+        for epoch in range(start_epoch, config.training.max_epochs + 1):
             train_metrics = run_one_epoch(
                 model=model,
                 loader=train_loader,
@@ -205,6 +271,16 @@ def train_transformer(
                 best_epoch = epoch
                 best_state_dict = _state_dict_to_cpu(deepcopy(model.state_dict()))
                 bad_epochs = 0
+                if config.output.save_best_model:
+                    _save_best_checkpoint(
+                        output_dir=output_dir,
+                        model_state_dict=best_state_dict,
+                        config=config,
+                        normalizer=normalizer,
+                        best_epoch=best_epoch,
+                        best_score=float(best_score),
+                        pos_weight=pos_weight,
+                    )
             else:
                 bad_epochs += 1
 
@@ -222,6 +298,23 @@ def train_transformer(
             ):
                 pd.DataFrame(history).to_csv(output_dir / "history.csv", index=False)
 
+            if config.training.save_latest_checkpoint:
+                _save_resume_checkpoint(
+                    checkpoint_path=latest_checkpoint_path,
+                    model=model,
+                    optimizer=optimizer,
+                    grad_scaler=grad_scaler,
+                    config=config,
+                    normalizer=normalizer,
+                    history=history,
+                    epoch=epoch,
+                    best_epoch=best_epoch,
+                    best_score=float(best_score),
+                    bad_epochs=bad_epochs,
+                    best_state_dict=best_state_dict,
+                    pos_weight=pos_weight,
+                )
+
             if (
                 config.early_stopping.enabled
                 and bad_epochs >= config.early_stopping.patience
@@ -232,6 +325,15 @@ def train_transformer(
         if best_state_dict is None:
             best_state_dict = _state_dict_to_cpu(deepcopy(model.state_dict()))
             best_epoch = len(history)
+
+        # Final full-dataset evaluation does not need optimizer state or stale gradients.
+        # Releasing them reduces the chance of CUDA OOM after the last training epoch.
+        optimizer.zero_grad(set_to_none=True)
+        del optimizer
+        if grad_scaler is not None:
+            del grad_scaler
+        if used_device.type == "cuda":
+            torch.cuda.empty_cache()
 
         model.load_state_dict(best_state_dict)
         model = model.to(used_device)
@@ -403,24 +505,24 @@ def _run_loader(
 
         valid_mask = ~padding_mask
 
-        with torch.set_grad_enabled(training):
-            with _autocast_context(config, device):
-                logits = model(
-                    peak_features=peak_features,
-                    spectrum_features=spectrum_features,
-                    padding_mask=padding_mask,
-                )
-                loss_matrix = criterion(logits, targets)
+        if training:
+            with torch.set_grad_enabled(True):
+                with _autocast_context(config, device):
+                    logits = model(
+                        peak_features=peak_features,
+                        spectrum_features=spectrum_features,
+                        padding_mask=padding_mask,
+                    )
+                    loss_matrix = criterion(logits, targets)
 
-            if config.data.use_training_weights:
-                loss_matrix = loss_matrix * weights
+                if config.data.use_training_weights:
+                    loss_matrix = loss_matrix * weights
 
-            # Ignore padded peak positions in both optimization and reported loss.
-            loss_matrix = loss_matrix * valid_mask.to(loss_matrix.dtype)
-            valid_count = int(valid_mask.sum().item())
-            loss = loss_matrix.sum() / max(valid_count, 1)
+                # Ignore padded peak positions in both optimization and reported loss.
+                loss_matrix = loss_matrix * valid_mask.to(loss_matrix.dtype)
+                valid_count = int(valid_mask.sum().item())
+                loss = loss_matrix.sum() / max(valid_count, 1)
 
-            if training:
                 assert optimizer is not None
                 optimizer.zero_grad(set_to_none=True)
                 if grad_scaler is not None and grad_scaler.is_enabled():
@@ -441,6 +543,23 @@ def _run_loader(
                             max_norm=config.training.gradient_clip_norm,
                         )
                     optimizer.step()
+        else:
+            with torch.inference_mode():
+                with _autocast_context(config, device):
+                    logits = model(
+                        peak_features=peak_features,
+                        spectrum_features=spectrum_features,
+                        padding_mask=padding_mask,
+                    )
+                    loss_matrix = criterion(logits, targets)
+
+                if config.data.use_training_weights:
+                    loss_matrix = loss_matrix * weights
+
+                # Ignore padded peak positions in both optimization and reported loss.
+                loss_matrix = loss_matrix * valid_mask.to(loss_matrix.dtype)
+                valid_count = int(valid_mask.sum().item())
+                loss = loss_matrix.sum() / max(valid_count, 1)
 
         total_loss += float(loss.item()) * valid_count
         total_valid_peaks += valid_count
@@ -488,6 +607,83 @@ def _run_loader(
 
 def _state_dict_to_cpu(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
     return {key: value.detach().cpu() for key, value in state_dict.items()}
+
+
+def _resolve_resume_checkpoint(
+    config: TrainingConfig,
+    output_dir: Path,
+    default_checkpoint_path: Path,
+) -> Path | None:
+    resume_from_checkpoint = config.training.resume_from_checkpoint
+    if resume_from_checkpoint is None:
+        return None
+
+    if resume_from_checkpoint.lower() == "auto":
+        return default_checkpoint_path if default_checkpoint_path.exists() else None
+
+    checkpoint_path = Path(resume_from_checkpoint)
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = output_dir / checkpoint_path
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+    return checkpoint_path
+
+
+def _save_resume_checkpoint(
+    checkpoint_path: Path,
+    model: PeakTransformerClassifier,
+    optimizer: torch.optim.Optimizer,
+    grad_scaler: torch.cuda.amp.GradScaler | None,
+    config: TrainingConfig,
+    normalizer: FeatureNormalizer,
+    history: list[dict[str, float]],
+    epoch: int,
+    best_epoch: int,
+    best_score: float,
+    bad_epochs: int,
+    best_state_dict: dict[str, Tensor] | None,
+    pos_weight: float | None,
+) -> None:
+    checkpoint = {
+        "epoch": int(epoch),
+        "model_state_dict": _state_dict_to_cpu(model.state_dict()),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "grad_scaler_state_dict": (
+            None if grad_scaler is None else grad_scaler.state_dict()
+        ),
+        "history": history,
+        "best_state_dict": best_state_dict,
+        "best_epoch": int(best_epoch),
+        "best_score": float(best_score),
+        "bad_epochs": int(bad_epochs),
+        "model_config": asdict(config.model),
+        "feature_config": {
+            "peak_feature_columns": list(config.features.peak_feature_columns),
+            "spectrum_feature_columns": list(config.features.spectrum_feature_columns),
+            "use_raw_peak_mz": bool(config.features.use_raw_peak_mz),
+            "raw_peak_mz_column": str(config.features.raw_peak_mz_column),
+            "use_raw_peak_intensity": bool(config.features.use_raw_peak_intensity),
+            "raw_peak_intensity_column": str(config.features.raw_peak_intensity_column),
+            "sort_raw_peak_inputs_by_mz": bool(
+                config.features.sort_raw_peak_inputs_by_mz
+            ),
+            "normalize_peak_features": bool(config.features.normalize_peak_features),
+            "normalize_spectrum_features": bool(
+                config.features.normalize_spectrum_features
+            ),
+        },
+        "normalizer": {
+            "peak_mean": normalizer.peak_mean,
+            "peak_std": normalizer.peak_std,
+            "spectrum_mean": normalizer.spectrum_mean,
+            "spectrum_std": normalizer.spectrum_std,
+        },
+        "pos_weight": None if pos_weight is None else float(pos_weight),
+        "threshold_for_binary_metrics": float(
+            config.evaluation.threshold_for_binary_metrics
+        ),
+    }
+    torch.save(checkpoint, checkpoint_path)
 
 
 def _save_best_checkpoint(
