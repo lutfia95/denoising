@@ -7,7 +7,10 @@ data:
   #test_path: "../data/demo/test_ten_rows.parquet"
 
   target_column: "annotation_mask" # Column containing the per-peak binary targets.
-  use_training_weights: false # Enables per-example weighting in the loss if available.
+  #loss_matrix = loss_matrix * weights otherwise: 
+  #FDR weights are already constrained to a safe range in src/features/fdr_weights.py
+  #the caution about “very large weights” does not really apply to the used-setup, we can keep it! ;)
+  use_training_weights: true # Enables per-example weighting in the loss if available.
   weight_column: "weight" # Column name to read sample weights from when weighting is enabled.
 
 output:
