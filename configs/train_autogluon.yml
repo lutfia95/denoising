@@ -4,7 +4,7 @@ data:
   test_path: "../data/splits/test.parquet"
 
   target_column: "annotation_mask" # per-peak binary labels after flattening each spectrum into peak rows
-  use_training_weights: false # optionally repeat a spectrum weight onto each peak row for AutoGluon
+  use_training_weights: true # optionally repeat a spectrum weight onto each peak row for AutoGluon
   weight_column: "weight"
 
 output:
