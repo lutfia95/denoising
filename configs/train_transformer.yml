@@ -58,6 +58,7 @@ model:
     num_heads: 4 # Number of attention heads in each encoder block.
     num_layers: 3 # Number of stacked transformer encoder blocks.
     ff_multiplier: 4.0 # Expansion factor for the feed-forward hidden layer.
+    #It prevents the model from relying too much on a few specific peak-to-peak relationships.
     dropout: 0.1 # Dropout probability applied inside the transformer.
     activation: "gelu" # Nonlinearity used in the feed-forward network and head.
     use_layer_norm: true # Enables layer normalization inside the encoder blocks.
@@ -76,6 +77,7 @@ training:
   dataloader_persistent_workers: true # Keeps dataloader workers alive across epochs.
   dataloader_pin_memory: true # Pins host memory to speed CPU-to-GPU transfers.
   enable_amp: true # Enables automatic mixed precision on CUDA.
+  #Mixed precision tries to match each op to its appropriate datatype. see https://docs.pytorch.org/docs/stable/amp.html
   compile_model: false # Disables torch.compile to reduce runtime memory risk.
   cache_dataset_in_memory: true # Precomputes dataset samples and keeps them in RAM.
   save_latest_checkpoint: true # Saves a resumable checkpoint after each epoch.
@@ -87,11 +89,12 @@ training:
     weight_decay: 0.0001 # L2-style parameter decay applied by the optimizer.
 
   scheduler:
+    # sofar not important, can be added afterwards
     enabled: false # Placeholder switch for learning-rate scheduling support.
 
   gradient_clip_norm: 1.0 # Max gradient norm used for clipping before optimizer step.
 
-loss:
+loss: #pos_weight is important, because we have class-imbalanced data! 
   name: "bce_with_logits" # Per-peak binary classification loss function.
   use_pos_weight: true # Uses a positive-class weight estimated from the training split.
   pos_weight: null # Manual positive-class weight override; null means auto-compute.

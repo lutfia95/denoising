@@ -1,2 +1,1 @@
 # denoising
-Spectra denoising

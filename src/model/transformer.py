@@ -35,19 +35,20 @@ class TransformerEncoderBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.use_layer_norm = use_layer_norm
-        self.norm1 = nn.LayerNorm(d_model)
+        self.norm1 = nn.LayerNorm(d_model) # start with 96
         self.norm2 = nn.LayerNorm(d_model)
-        self.attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=num_heads,
+        # Code is from "Attention Is All You Need"  https://doi.org/10.48550/arXiv.1706.0376
+        self.attn = nn.MultiheadAttention( #Allows the model to jointly attend to information from different representation subspaces
+            embed_dim=d_model, #Total dimension of the model.
+            num_heads=num_heads, #Number of parallel attention heads
             dropout=dropout,
-            batch_first=True,
+            batch_first=True, # The input and output tensors are provided as (batch, seq, feature)
         )
         self.dropout = nn.Dropout(dropout)
         self.ff = nn.Sequential(
             nn.Linear(d_model, ff_hidden_dim),
-            _get_activation(activation),
-            nn.Dropout(dropout),
+            _get_activation(activation), # apply non-linearity
+            nn.Dropout(dropout), #It prevents the model from relying too much on a few specific peak-to-peak relationships.
             nn.Linear(ff_hidden_dim, d_model),
         )
 
@@ -70,6 +71,11 @@ class TransformerEncoderBlock(nn.Module):
 
 
 class PeakTransformerClassifier(nn.Module):
+    """It converts the attention embeddings into per-peak logits with self head
+
+    Args:
+        nn (Module): _description_
+    """
     def __init__(self, config: PeakTransformerConfig) -> None:
         super().__init__()
         self.config = config
@@ -98,7 +104,7 @@ class PeakTransformerClassifier(nn.Module):
                 nn.Sigmoid(),
             )
 
-        self.encoder = nn.ModuleList(
+        self.encoder = nn.ModuleList( #contextualized per-peak embeddings
             [
                 TransformerEncoderBlock(
                     d_model=self.config.d_model,
@@ -111,6 +117,10 @@ class PeakTransformerClassifier(nn.Module):
                 for _ in range(self.config.num_layers)
             ]
         )
+        #Encoder Representation: 
+        #1- the original token information through residual connections
+        #2- information mixed from other peaks via self-attention
+        #3- additional per-token transformation via the FFN
         self.output_norm = nn.LayerNorm(self.config.d_model)
         self.head = nn.Sequential(
             nn.Linear(self.config.d_model, self.config.d_model),
@@ -123,7 +133,9 @@ class PeakTransformerClassifier(nn.Module):
         self,
         peak_features: Tensor,
         spectrum_features: Tensor,
-        padding_mask: Tensor,
+        padding_mask: Tensor, #sequence mask that tells the transformer which peak positions are real and which ones are just padding added to make all spectra in the
+        #batch have the same length.
+        # added ones will be skipped during training, but we need to make them all same length!
     ) -> Tensor:
         self._validate_inputs(
             peak_features=peak_features,
