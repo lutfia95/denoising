@@ -60,8 +60,8 @@ autogluon:
   sample_weight_column: null
   weight_evaluation: false
   dynamic_stacking: false # avoid expensive DyStack / Ray side work unless you really need it
-  num_stack_levels: 1
-  use_bag_holdout: true # valid when tuning_data is passed alongside bagging
+  num_stack_levels: 0
+  use_bag_holdout: false # valid when tuning_data is passed alongside bagging
   fit_weighted_ensemble: true
   save_bag_folds: true
   save_leaderboard: true
