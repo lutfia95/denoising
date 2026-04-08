@@ -122,6 +122,8 @@ def train_autogluon(config: AutoGluonTrainingConfig) -> dict[str, object]:
             use_bag_holdout=config.autogluon.use_bag_holdout,
             fit_weighted_ensemble=config.autogluon.fit_weighted_ensemble,
             save_bag_folds=config.autogluon.save_bag_folds,
+            num_bag_folds=0,
+            num_cpus=60,
         )
 
         if config.output.save_fit_summary:
