@@ -24,3 +24,7 @@ split:
   val_fraction: 0.15
   test_fraction: 0.15
   random_seed: 42
+  length_weight: true # if true, multiply the FDR weight by a clipped per-spectrum true/false ratio
+  length_weight_eps: 1.0 # smoothing so spectra with zero true or zero false labels stay finite
+  length_weight_min: 0.5 # lower clip for the true/false ratio factor
+  length_weight_max: 2.0 # upper clip for the true/false ratio factor

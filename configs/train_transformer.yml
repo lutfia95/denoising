@@ -1,7 +1,10 @@
 data:
-  train_path: "../data/splits/train.parquet" # Parquet file used for model fitting.
-  val_path: "../data/splits/val.parquet" # Parquet file used for validation during training.
-  test_path: "../data/splits/test.parquet" # Parquet file used for final held-out evaluation.
+  train_path: "../data/splits_1pct_filtered/train.parquet"
+  val_path: "../data/splits_1pct_filtered/val.parquet"
+  test_path: "../data/splits_1pct_filtered/test.parquet"
+  # train_path: "../data/splits_6pct_filtered/train.parquet"
+  # val_path: "../data/splits_6pct_filtered/val.parquet"
+  # test_path: "../data/splits_6pct_filtered/test.parquet"
   #train_path: "../data/demo/train_ten_rows.parquet"
   #val_path: "../data/demo/val_ten_rows.parquet"
   #test_path: "../data/demo/test_ten_rows.parquet"
@@ -14,7 +17,8 @@ data:
   weight_column: "weight" # Column name to read sample weights from when weighting is enabled.
 
 output:
-  output_dir: "../outputs/transformer_peak_classifier" # Directory where all training artifacts are written.
+  output_dir: "../outputs/transformer_peak_classifier_1pct_filtered" # Directory where all training artifacts are written.
+  #output_dir: "../outputs/transformer_peak_classifier_6pct_filtered" 
   save_best_model: true # Writes the best validation checkpoint to disk.
   save_epoch_history: true # Saves per-epoch metrics to a CSV file.
   save_metrics_summary: true # Saves the final validation and test metrics summary as JSON.
@@ -109,7 +113,7 @@ early_stopping:
 
 evaluation:
   primary_metric: "pr_auc" # Main evaluation metric emphasized in reports.
-  threshold_for_binary_metrics: 0.5 # Probability cutoff used for discrete binary metrics.
+  threshold_for_binary_metrics: 0.3 # Probability cutoff used for discrete binary metrics.
 
   report_metrics:
     - "pr_auc" # Precision-recall area under the curve.

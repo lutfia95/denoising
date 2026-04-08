@@ -210,6 +210,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         test_fraction=float(split_cfg.get("test_fraction", 0.15)),
         random_seed=int(split_cfg.get("random_seed", 42)),
         split_method=str(split_cfg.get("split_method", "PeakListFileName")),
+        length_weight=bool(split_cfg.get("length_weight", False)),
+        length_weight_eps=float(split_cfg.get("length_weight_eps", 1.0)),
+        length_weight_min=float(split_cfg.get("length_weight_min", 0.5)),
+        length_weight_max=float(split_cfg.get("length_weight_max", 2.0)),
     )
 
     return AppConfig(

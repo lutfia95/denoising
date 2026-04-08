@@ -16,6 +16,10 @@ class SplitConfig:
     test_fraction: float = 0.15
     random_seed: int = 42
     split_method: str = "PeakListFileName"
+    length_weight: bool = False
+    length_weight_eps: float = 1.0
+    length_weight_min: float = 0.5
+    length_weight_max: float = 2.0
 
     def validate(self) -> None:
         total = self.train_fraction + self.val_fraction + self.test_fraction
@@ -34,6 +38,14 @@ class SplitConfig:
         if self.split_method not in allowed:
             raise ValueError(
                 f"split_method must be one of {sorted(allowed)}, got {self.split_method!r}"
+            )
+        if self.length_weight_eps <= 0.0:
+            raise ValueError("length_weight_eps must be > 0")
+        if self.length_weight_min <= 0.0:
+            raise ValueError("length_weight_min must be > 0")
+        if self.length_weight_max < self.length_weight_min:
+            raise ValueError(
+                "length_weight_max must be greater than or equal to length_weight_min"
             )
 
 
@@ -215,6 +227,10 @@ class GroupedSpectrumSplitter:
         rows: list[dict[str, Any]] = []
 
         for ps in spectra:
+            length_weight = self._compute_length_weight(ps)
+            fdr_weight = float(ps.fdr_weight.weight)
+            final_weight = fdr_weight * length_weight
+
             rows.append(
                 {
                     "split": split_name, # train / test / val
@@ -235,7 +251,9 @@ class GroupedSpectrumSplitter:
                     ),
                     "fdr": ps.record.fdr, #Original FDR
                     "clipped_fdr": ps.fdr_weight.clipped_fdr, # FDR after clipping into the configured allowed range
-                    "weight": ps.fdr_weight.weight, # Training weight derived from the clipped FDR value
+                    "fdr_weight": fdr_weight, # Weight derived only from the configured FDR rule
+                    "length_weight": length_weight, # Optional per-spectrum true/false balance factor
+                    "weight": final_weight, # Final training weight after combining the active components
                     "num_peaks": ps.spectrum_features.num_peaks, # Number of peaks in the processed spectrum
                     "tic": ps.spectrum_features.tic, # Total ion current, which is the sum of spectrum' intensities
                     "peak_feature_mz": ps.peak_features.mz.tolist(), # Peak m/z values used in the peak feature matrix
@@ -274,3 +292,23 @@ class GroupedSpectrumSplitter:
             )
 
         return pd.DataFrame(rows)
+
+    def _compute_length_weight(self, ps: ProcessedSpectrum) -> float:
+        if not self.config.length_weight:
+            return 1.0
+
+        annotation_mask = ps.record.annotation_mask
+        if annotation_mask is None:
+            return 1.0
+
+        n_true = int(annotation_mask.sum())
+        n_false = int(annotation_mask.shape[0] - n_true)
+        eps = float(self.config.length_weight_eps)
+        raw_weight = (n_true + eps) / (n_false + eps)
+
+        return float(
+            min(
+                max(raw_weight, self.config.length_weight_min),
+                self.config.length_weight_max,
+            )
+        )

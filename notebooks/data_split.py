@@ -23,7 +23,8 @@ import matplotlib.pyplot as plt
 
 
 
-FDR_6pct_PATH = "../data/unique_FDR6pct.parquet"
+FDR_6pct_PATH = "../data/combined_unique_filtered.parquet"
+#FDR_6pct_PATH = "../data/unique_FDR6pct_filtered.parquet"
 # (55598, 10)
 # ['SearchID', 'PeakListFileName', 'scan', 'mz_arr', 'int_arr', 'Charge', 'exp m/z', 'annotation_mask', 'fdr', 'ScanId']
 #    split      split_method  n_rows  n_unique_spectra  n_unique_groups
@@ -57,5 +58,6 @@ split_result = splitter.split(processed_spectra)
 
 print(split_result.summary_df)
 
-OUTPUT_DIR = Path.cwd().parent / "data" / "splits_6pct"
+OUTPUT_DIR = Path.cwd().parent / "data" / "splits_1pct_filtered"
+#OUTPUT_DIR = Path.cwd().parent / "data" / "splits_6pct_filtered"
 splitter.write_split_parquets(split_result, OUTPUT_DIR)

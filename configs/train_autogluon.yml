@@ -1,14 +1,18 @@
 data:
-  train_path: "../data/splits/train.parquet"
-  val_path: "../data/splits/val.parquet"
-  test_path: "../data/splits/test.parquet"
+  train_path: "../data/splits_1pct_filtered/train.parquet"
+  val_path: "../data/splits_1pct_filtered/val.parquet"
+  test_path: "../data/splits_1pct_filtered/test.parquet"
+  # train_path: "../data/splits_6pct_filtered/train.parquet"
+  # val_path: "../data/splits_6pct_filtered/val.parquet"
+  # test_path: "../data/splits_6pct_filtered/test.parquet"
 
   target_column: "annotation_mask" # per-peak binary labels after flattening each spectrum into peak rows
   use_training_weights: true # optionally repeat a spectrum weight onto each peak row for AutoGluon
   weight_column: "weight"
 
 output:
-  output_dir: "../outputs/autogluon_peak_baseline"
+  output_dir: "../outputs/splits_6pct_filtered"
+  #output_dir: "../outputs/splits_1pct_filtered"
   predictor_subdir: "autogluon_predictor"
   unique_predictor_subdir: true # create a new predictor directory each run to avoid "Learner is already fit"
   save_metrics_summary: true
@@ -68,7 +72,7 @@ autogluon:
 
 evaluation:
   primary_metric: "pr_auc"
-  threshold_for_binary_metrics: 0.5
+  threshold_for_binary_metrics: 0.3
 
   report_metrics:
     - "pr_auc"
