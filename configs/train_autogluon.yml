@@ -11,8 +11,8 @@ data:
   weight_column: "weight"
 
 output:
-  output_dir: "../outputs/splits_6pct_filtered"
-  #output_dir: "../outputs/splits_1pct_filtered"
+  #output_dir: "../outputs/splits_6pct_filtered"
+  output_dir: "../outputs/splits_1pct_filtered"
   predictor_subdir: "autogluon_predictor"
   unique_predictor_subdir: true # create a new predictor directory each run to avoid "Learner is already fit"
   save_metrics_summary: true
