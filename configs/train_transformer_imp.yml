@@ -1,0 +1,140 @@
+data:
+  train_path: "../data/splits_1pct_filtered/train.parquet"
+  val_path: "../data/splits_1pct_filtered/val.parquet"
+  test_path: "../data/splits_1pct_filtered/test.parquet"
+
+  target_column: "annotation_mask"
+  use_training_weights: true
+  weight_column: "weight"
+
+output:
+  output_dir: "../outputs/transformer_peak_classifier_imp_1pct_filtered_imp"
+  save_best_model: true
+  save_epoch_history: true
+  save_metrics_summary: true
+  save_plots: true
+  save_confusion_matrices: true
+  device_verbose: true
+  enable_file_logging: true
+  log_file_name: "training.log"
+
+features:
+  # Leaner peak inputs: keep the features that encode chemistry and local geometry,
+  # and drop duplicate absolute channels that previously told the model the same thing
+  # multiple times.
+  peak_feature_columns:
+    - "peak_feature_log_intensity"
+    - "peak_feature_relative_intensity"
+    - "peak_feature_mz_over_precursor"
+    - "peak_feature_delta_to_precursor"
+    - "peak_feature_delta_prev"
+    - "peak_feature_delta_next"
+
+  spectrum_feature_columns:
+    - "Charge"
+    - "exp m/z"
+    - "num_peaks"
+    - "tic"
+
+  # Keep raw m/z as the one absolute coordinate channel. This preserves access to
+  # the ordered spectrum axis without duplicating raw intensity and engineered m/z.
+  use_raw_peak_mz: true
+  raw_peak_mz_column: "mz_arr"
+  use_raw_peak_intensity: false
+  raw_peak_intensity_column: "int_arr"
+  sort_raw_peak_inputs_by_mz: true
+  broadcast_spectrum_features_to_peaks: false
+  normalize_peak_features: true
+  normalize_spectrum_features: true
+  normalization_fit_split: "train"
+
+model:
+  name: "transformer_peak_classifier_imp"
+
+  transformer_imp:
+    # A slightly wider encoder makes room for a more structured inductive bias
+    # while still staying modest for this dataset size.
+    d_model: 160
+    num_heads: 8
+    num_layers: 5
+    ff_multiplier: 4.0
+    dropout: 0.1
+    activation: "gelu"
+    use_layer_norm: true
+    output_dim: 1
+
+    # New architecture changes relative to the baseline:
+    # 1) learned rank embeddings over peaks sorted by m/z
+    # 2) a dedicated global spectrum token
+    # 3) local-plus-global attention instead of unconstrained full attention
+    # 4) spectrum-conditioned scale/shift on peak tokens before encoding
+    max_position_embeddings: 4096
+    local_attention_window: 32
+    use_global_spectrum_token: true
+    use_learned_peak_rank_embedding: true
+    use_spectrum_scale_shift: true
+    # Raw m/z is the last peak feature in this config because it is appended after
+    # the engineered features. The model uses it to build an m/z-aware attention bias.
+    raw_mz_feature_index: -1
+    use_mz_relative_bias: true
+    mz_relative_bias_scale: 0.25
+
+training:
+  seed: 42
+  batch_size: 8
+  num_workers: 2
+  max_epochs: 60
+  cpu_num_threads: 8
+  cpu_num_interop_threads: 2
+  dataloader_prefetch_factor: 4
+  dataloader_persistent_workers: true
+  dataloader_pin_memory: true
+  enable_amp: true
+  compile_model: false
+  cache_dataset_in_memory: true
+  save_latest_checkpoint: true
+  resume_from_checkpoint: null
+
+  optimizer:
+    name: "adamw"
+    learning_rate: 0.0003
+    weight_decay: 0.0001
+
+  scheduler:
+    # The current training loop only exposes an enabled flag. The final version
+    # should use warmup + cosine decay once the trainer is extended.
+    enabled: true
+
+  gradient_clip_norm: 1.0
+
+loss:
+  name: "bce_with_logits"
+  use_pos_weight: true
+  pos_weight: null
+  reduction: "none"
+
+early_stopping:
+  enabled: true
+  monitor: "val_pr_auc"
+  mode: "max"
+  patience: 10
+  min_delta: 0.0001
+
+evaluation:
+  primary_metric: "pr_auc"
+  # Keep this as a starting point only. For a final denoising model, tune the
+  # decision threshold on validation instead of hard-coding one operating point.
+  threshold_for_binary_metrics: 0.4
+
+  report_metrics:
+    - "pr_auc"
+    - "roc_auc"
+    - "f1"
+    - "mcc"
+    - "precision"
+    - "recall"
+
+  retained_peak_fractions:
+    - 0.3
+    - 0.5
+    - 0.7
