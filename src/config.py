@@ -9,6 +9,7 @@ from src.features.peak_features import PeakFeatureConfig
 from src.features.spectrum_features import SpectrumFeatureConfig
 from src.model.mlp import MLPConfig
 from src.model.transformer import PeakTransformerConfig
+from src.model.transformer_imp import PeakTransformerImpConfig
 from src.splitting.splitter import SplitConfig
 
 
@@ -107,7 +108,7 @@ class EvaluationConfig:
 class TrainingConfig:
     data: DataConfig
     features: FeatureSelectionConfig
-    model: MLPConfig | PeakTransformerConfig
+    model: MLPConfig | PeakTransformerConfig | PeakTransformerImpConfig
     training: TrainingLoopConfig
     loss: LossConfig
     early_stopping: EarlyStoppingConfig
@@ -539,6 +540,199 @@ def load_transformer_training_config(config_path: str | Path) -> TrainingConfig:
         primary_metric=str(eval_cfg.get("primary_metric", "pr_auc")),
         threshold_for_binary_metrics=float(
             eval_cfg.get("threshold_for_binary_metrics", 0.5)
+        ),
+        report_metrics=list(
+            eval_cfg.get(
+                "report_metrics",
+                ["pr_auc", "roc_auc", "f1", "mcc", "precision", "recall"],
+            )
+        ),
+        retained_peak_fractions=[
+            float(x) for x in eval_cfg.get("retained_peak_fractions", [0.3, 0.5, 0.7])
+        ],
+    )
+
+    data = DataConfig(
+        train_path=str(data_cfg.get("train_path", "data/splits/train.parquet")),
+        val_path=str(data_cfg.get("val_path", "data/splits/val.parquet")),
+        test_path=str(data_cfg.get("test_path", "data/splits/test.parquet")),
+        target_column=str(data_cfg.get("target_column", "annotation_mask")),
+        use_training_weights=bool(data_cfg.get("use_training_weights", False)),
+        weight_column=str(data_cfg.get("weight_column", "weight")),
+    )
+
+    return TrainingConfig(
+        data=data,
+        features=features,
+        model=model,
+        training=training,
+        loss=loss,
+        early_stopping=early_stopping,
+        evaluation=evaluation,
+        output=output,
+    )
+
+
+def load_transformer_imp_training_config(config_path: str | Path) -> TrainingConfig:
+    path = Path(config_path)
+    with path.open("r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+
+    data_cfg = raw.get("data", {})
+    output_cfg = raw.get("output", {})
+    features_cfg = raw.get("features", {})
+    model_cfg = raw.get("model", {})
+    transformer_cfg = model_cfg.get("transformer_imp", {})
+    training_cfg = raw.get("training", {})
+    optimizer_cfg = training_cfg.get("optimizer", {})
+    scheduler_cfg = training_cfg.get("scheduler", {})
+    loss_cfg = raw.get("loss", {})
+    early_cfg = raw.get("early_stopping", {})
+    eval_cfg = raw.get("evaluation", {})
+
+    features = FeatureSelectionConfig(
+        peak_feature_columns=list(features_cfg.get("peak_feature_columns", [])),
+        spectrum_feature_columns=list(features_cfg.get("spectrum_feature_columns", [])),
+        use_raw_peak_mz=bool(features_cfg.get("use_raw_peak_mz", True)),
+        raw_peak_mz_column=str(features_cfg.get("raw_peak_mz_column", "mz_arr")),
+        use_raw_peak_intensity=bool(features_cfg.get("use_raw_peak_intensity", False)),
+        raw_peak_intensity_column=str(
+            features_cfg.get("raw_peak_intensity_column", "int_arr")
+        ),
+        sort_raw_peak_inputs_by_mz=bool(
+            features_cfg.get("sort_raw_peak_inputs_by_mz", True)
+        ),
+        broadcast_spectrum_features_to_peaks=bool(
+            features_cfg.get("broadcast_spectrum_features_to_peaks", False)
+        ),
+        normalize_peak_features=bool(features_cfg.get("normalize_peak_features", True)),
+        normalize_spectrum_features=bool(
+            features_cfg.get("normalize_spectrum_features", True)
+        ),
+        normalization_fit_split=str(
+            features_cfg.get("normalization_fit_split", "train")
+        ),
+    )
+    output = OutputConfig(
+        output_dir=str(
+            output_cfg.get("output_dir", "outputs/transformer_baseline_improved")
+        ),
+        save_best_model=bool(output_cfg.get("save_best_model", True)),
+        save_epoch_history=bool(output_cfg.get("save_epoch_history", True)),
+        save_metrics_summary=bool(output_cfg.get("save_metrics_summary", True)),
+        save_plots=bool(output_cfg.get("save_plots", True)),
+        save_confusion_matrices=bool(output_cfg.get("save_confusion_matrices", True)),
+        device_verbose=bool(output_cfg.get("device_verbose", True)),
+        enable_file_logging=bool(output_cfg.get("enable_file_logging", True)),
+        log_file_name=str(output_cfg.get("log_file_name", "training.log")),
+    )
+
+    model = PeakTransformerImpConfig(
+        peak_input_dim=(
+            len(features.peak_feature_columns)
+            + int(features.use_raw_peak_mz)
+            + int(features.use_raw_peak_intensity)
+        ),
+        spectrum_input_dim=len(features.spectrum_feature_columns),
+        d_model=int(transformer_cfg.get("d_model", 160)),
+        num_heads=int(transformer_cfg.get("num_heads", 8)),
+        num_layers=int(transformer_cfg.get("num_layers", 5)),
+        ff_multiplier=float(transformer_cfg.get("ff_multiplier", 4.0)),
+        dropout=float(transformer_cfg.get("dropout", 0.1)),
+        activation=str(transformer_cfg.get("activation", "gelu")),
+        use_layer_norm=bool(transformer_cfg.get("use_layer_norm", True)),
+        output_dim=int(transformer_cfg.get("output_dim", 1)),
+        max_position_embeddings=int(
+            transformer_cfg.get("max_position_embeddings", 4096)
+        ),
+        local_attention_window=int(
+            transformer_cfg.get("local_attention_window", 32)
+        ),
+        use_global_spectrum_token=bool(
+            transformer_cfg.get("use_global_spectrum_token", True)
+        ),
+        use_learned_peak_rank_embedding=bool(
+            transformer_cfg.get("use_learned_peak_rank_embedding", True)
+        ),
+        use_spectrum_scale_shift=bool(
+            transformer_cfg.get("use_spectrum_scale_shift", True)
+        ),
+        raw_mz_feature_index=int(transformer_cfg.get("raw_mz_feature_index", -1)),
+        use_mz_relative_bias=bool(transformer_cfg.get("use_mz_relative_bias", True)),
+        mz_relative_bias_scale=float(
+            transformer_cfg.get("mz_relative_bias_scale", 0.25)
+        ),
+    )
+
+    training = TrainingLoopConfig(
+        seed=int(training_cfg.get("seed", 42)),
+        batch_size=int(training_cfg.get("batch_size", 8)),
+        num_workers=int(training_cfg.get("num_workers", 2)),
+        max_epochs=int(training_cfg.get("max_epochs", 60)),
+        cpu_num_threads=(
+            None
+            if training_cfg.get("cpu_num_threads", None) is None
+            else int(training_cfg.get("cpu_num_threads"))
+        ),
+        cpu_num_interop_threads=(
+            None
+            if training_cfg.get("cpu_num_interop_threads", None) is None
+            else int(training_cfg.get("cpu_num_interop_threads"))
+        ),
+        dataloader_prefetch_factor=int(training_cfg.get("dataloader_prefetch_factor", 4)),
+        dataloader_persistent_workers=bool(
+            training_cfg.get("dataloader_persistent_workers", True)
+        ),
+        dataloader_pin_memory=(
+            None
+            if training_cfg.get("dataloader_pin_memory", None) is None
+            else bool(training_cfg.get("dataloader_pin_memory"))
+        ),
+        enable_amp=bool(training_cfg.get("enable_amp", True)),
+        compile_model=bool(training_cfg.get("compile_model", False)),
+        cache_dataset_in_memory=bool(
+            training_cfg.get("cache_dataset_in_memory", True)
+        ),
+        save_latest_checkpoint=bool(
+            training_cfg.get("save_latest_checkpoint", True)
+        ),
+        resume_from_checkpoint=(
+            None
+            if training_cfg.get("resume_from_checkpoint", None) is None
+            else str(training_cfg.get("resume_from_checkpoint"))
+        ),
+        optimizer=OptimizerConfig(
+            name=str(optimizer_cfg.get("name", "adamw")),
+            learning_rate=float(optimizer_cfg.get("learning_rate", 3.0e-4)),
+            weight_decay=float(optimizer_cfg.get("weight_decay", 1.0e-4)),
+        ),
+        scheduler=SchedulerConfig(
+            enabled=bool(scheduler_cfg.get("enabled", True)),
+        ),
+        gradient_clip_norm=float(training_cfg.get("gradient_clip_norm", 1.0)),
+    )
+
+    loss = LossConfig(
+        name=str(loss_cfg.get("name", "bce_with_logits")),
+        use_pos_weight=bool(loss_cfg.get("use_pos_weight", True)),
+        pos_weight=None
+        if loss_cfg.get("pos_weight", None) is None
+        else float(loss_cfg.get("pos_weight")),
+        reduction=str(loss_cfg.get("reduction", "none")),
+    )
+
+    early_stopping = EarlyStoppingConfig(
+        enabled=bool(early_cfg.get("enabled", True)),
+        monitor=str(early_cfg.get("monitor", "val_pr_auc")),
+        mode=str(early_cfg.get("mode", "max")),
+        patience=int(early_cfg.get("patience", 10)),
+        min_delta=float(early_cfg.get("min_delta", 1.0e-4)),
+    )
+
+    evaluation = EvaluationConfig(
+        primary_metric=str(eval_cfg.get("primary_metric", "pr_auc")),
+        threshold_for_binary_metrics=float(
+            eval_cfg.get("threshold_for_binary_metrics", 0.4)
         ),
         report_metrics=list(
             eval_cfg.get(
