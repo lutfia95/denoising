@@ -35,6 +35,12 @@ features:
     - "exp m/z"
     - "num_peaks"
     - "tic"
+  use_instrument_label: true
+  instrument_names:
+    - "_A_"
+    - "_Z_"
+    - "_R_"
+  instrument_label_source_column: "PeakListFileName"
 
   # Keep raw m/z as the one absolute coordinate channel. This preserves access to
   # the ordered spectrum axis without duplicating raw intensity and engineered m/z.

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import yaml
 
@@ -44,6 +44,9 @@ class FeatureSelectionConfig:
     normalize_peak_features: bool
     normalize_spectrum_features: bool
     normalization_fit_split: str
+    use_instrument_label: bool = False
+    instrument_names: list[str] = field(default_factory=list)
+    instrument_label_source_column: str = "PeakListFileName"
 
 
 @dataclass(slots=True)
@@ -264,6 +267,11 @@ def load_training_config(config_path: str | Path) -> TrainingConfig:
         normalization_fit_split=str(
             features_cfg.get("normalization_fit_split", "train")
         ),
+        use_instrument_label=bool(features_cfg.get("use_instrument_label", False)),
+        instrument_names=[str(x) for x in features_cfg.get("instrument_names", [])],
+        instrument_label_source_column=str(
+            features_cfg.get("instrument_label_source_column", "PeakListFileName")
+        ),
     )
     output = OutputConfig(
         output_dir=str(output_cfg.get("output_dir", "outputs/mlp_baseline")),
@@ -283,7 +291,10 @@ def load_training_config(config_path: str | Path) -> TrainingConfig:
             + int(features.use_raw_peak_mz)
             + int(features.use_raw_peak_intensity)
         ),
-        spectrum_input_dim=len(features.spectrum_feature_columns),
+        spectrum_input_dim=(
+            len(features.spectrum_feature_columns)
+            + (len(features.instrument_names) if features.use_instrument_label else 0)
+        ),
         hidden_dims=[int(x) for x in mlp_cfg.get("hidden_dims", [128, 64])],
         dropout=float(mlp_cfg.get("dropout", 0.1)),
         activation=str(mlp_cfg.get("activation", "gelu")),
@@ -435,6 +446,11 @@ def load_transformer_training_config(config_path: str | Path) -> TrainingConfig:
         normalization_fit_split=str(
             features_cfg.get("normalization_fit_split", "train")
         ),
+        use_instrument_label=bool(features_cfg.get("use_instrument_label", False)),
+        instrument_names=[str(x) for x in features_cfg.get("instrument_names", [])],
+        instrument_label_source_column=str(
+            features_cfg.get("instrument_label_source_column", "PeakListFileName")
+        ),
     )
     output = OutputConfig(
         output_dir=str(output_cfg.get("output_dir", "outputs/transformer_baseline")),
@@ -454,7 +470,10 @@ def load_transformer_training_config(config_path: str | Path) -> TrainingConfig:
             + int(features.use_raw_peak_mz)
             + int(features.use_raw_peak_intensity)
         ),
-        spectrum_input_dim=len(features.spectrum_feature_columns),
+        spectrum_input_dim=(
+            len(features.spectrum_feature_columns)
+            + (len(features.instrument_names) if features.use_instrument_label else 0)
+        ),
         d_model=int(transformer_cfg.get("d_model", 96)),
         num_heads=int(transformer_cfg.get("num_heads", 4)),
         num_layers=int(transformer_cfg.get("num_layers", 3)),
@@ -612,6 +631,11 @@ def load_transformer_imp_training_config(config_path: str | Path) -> TrainingCon
         normalization_fit_split=str(
             features_cfg.get("normalization_fit_split", "train")
         ),
+        use_instrument_label=bool(features_cfg.get("use_instrument_label", False)),
+        instrument_names=[str(x) for x in features_cfg.get("instrument_names", [])],
+        instrument_label_source_column=str(
+            features_cfg.get("instrument_label_source_column", "PeakListFileName")
+        ),
     )
     output = OutputConfig(
         output_dir=str(
@@ -633,7 +657,10 @@ def load_transformer_imp_training_config(config_path: str | Path) -> TrainingCon
             + int(features.use_raw_peak_mz)
             + int(features.use_raw_peak_intensity)
         ),
-        spectrum_input_dim=len(features.spectrum_feature_columns),
+        spectrum_input_dim=(
+            len(features.spectrum_feature_columns)
+            + (len(features.instrument_names) if features.use_instrument_label else 0)
+        ),
         d_model=int(transformer_cfg.get("d_model", 160)),
         num_heads=int(transformer_cfg.get("num_heads", 8)),
         num_layers=int(transformer_cfg.get("num_layers", 5)),
@@ -809,6 +836,11 @@ def load_autogluon_training_config(
         ),
         normalization_fit_split=str(
             features_cfg.get("normalization_fit_split", "train")
+        ),
+        use_instrument_label=bool(features_cfg.get("use_instrument_label", False)),
+        instrument_names=[str(x) for x in features_cfg.get("instrument_names", [])],
+        instrument_label_source_column=str(
+            features_cfg.get("instrument_label_source_column", "PeakListFileName")
         ),
     )
 
