@@ -1,10 +1,9 @@
 input:
-  mgf_path: "B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1.mgf"
-  peak_list_file_name: "B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1.mgf" #PeakListFileName
-  instrument_source_value: "recal_Z_260313_SEC_FS_44_CK_pepSEC_non_enri_IWZPvVM.mgf" # only for use_instrument_label: true! skip for now!
+  mgf_path: "/mnt/c/Users/yynk1/Downloads/denoising/B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1 (1).mgf"
+  peak_list_file_name: "B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1 (1).mgf" #PeakListFileName
 
 model:
-  checkpoint_path: "transformer_peak_classifier_imp_1pct_filtered_imp_03_threshold/best_model.pt"
+  checkpoint_path: "/mnt/c/Users/yynk1/Downloads/denoising/transformer_peak_classifier_imp_1pct_filtered_imp_03_threshold/best_model.pt"
 
 features:
   peak_feature_columns:
@@ -19,12 +18,7 @@ features:
     - "exp m/z"
     - "num_peaks"
     - "tic"
-  use_instrument_label: true
-  instrument_names:
-    - "_A_"
-    - "_Z_"
-    - "_R_"
-  instrument_label_source_column: "PeakListFileName"
+  use_instrument_label: false
   use_raw_peak_mz: true
   raw_peak_mz_column: "mz_arr"
   use_raw_peak_intensity: false
@@ -43,7 +37,7 @@ runtime:
   batch_size: 8
 
 output:
-  output_dir: "outputs/inference_transformer_peak_classifier_imp"
+  output_dir: "/mnt/c/Users/yynk1/Downloads/denoising/inference_transformer_peak_classifier_imp"
   write_filtered_mgf: true
   write_dropped_peaks_report: true
   dropped_peaks_report_name: "dropped_peaks.csv"

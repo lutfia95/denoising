@@ -4,12 +4,17 @@ import argparse
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
 import yaml
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.features.peak_features import PeakFeatureComputer, PeakFeatureConfig
 from src.features.spectrum_features import SpectrumFeatureComputer, SpectrumFeatureConfig
@@ -231,8 +236,22 @@ def _compare_feature_configs(config_features: dict[str, Any], checkpoint_feature
     ]
     mismatches: list[str] = []
     for key in keys_to_compare:
-        config_value = config_features.get(key)
-        checkpoint_value = checkpoint_features.get(key)
+        if key == "use_instrument_label":
+            config_value = bool(config_features.get(key, False))
+            checkpoint_value = bool(checkpoint_features.get(key, False))
+        elif key == "instrument_names":
+            config_value = list(config_features.get(key, []))
+            checkpoint_value = list(checkpoint_features.get(key, []))
+        elif key == "instrument_label_source_column":
+            config_value = config_features.get(key)
+            checkpoint_value = checkpoint_features.get(key)
+            if not config_features.get("use_instrument_label", False):
+                config_value = None
+            if not checkpoint_features.get("use_instrument_label", False):
+                checkpoint_value = None
+        else:
+            config_value = config_features.get(key)
+            checkpoint_value = checkpoint_features.get(key)
         if config_value != checkpoint_value:
             mismatches.append(
                 f"{key}: config={config_value!r}, checkpoint={checkpoint_value!r}"
@@ -566,11 +585,19 @@ def parse_args() -> argparse.Namespace:
         description="Run inference for the improved transformer denoising model on an MGF file."
     )
     parser.add_argument(
-        "--config",
-        required=True,
+        "config_path",
+        nargs="?",
         help="Path to the inference YAML config.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--config",
+        help="Path to the inference YAML config.",
+    )
+    args = parser.parse_args()
+    args.config = args.config or args.config_path
+    if not args.config:
+        parser.error("the following arguments are required: --config")
+    return args
 
 
 def main() -> None:
