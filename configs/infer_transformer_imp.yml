@@ -1,6 +1,6 @@
 input:
-  mgf_path: "/mnt/c/Users/yynk1/Downloads/denoising/B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1 (1).mgf"
-  peak_list_file_name: "B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1 (1).mgf" #PeakListFileName
+  mgf_path: "/mnt/c/Users/yynk1/Downloads/denoising/B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1.mgf"
+  peak_list_file_name: "B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1.mgf" #PeakListFileName
 
 model:
   checkpoint_path: "/mnt/c/Users/yynk1/Downloads/denoising/transformer_peak_classifier_imp_1pct_filtered_imp_03_threshold/best_model.pt"
@@ -33,8 +33,8 @@ evaluation:
   threshold_for_binary_metrics: 0.3
 
 runtime:
-  device: "cpu"
-  batch_size: 8
+  device: "cuda"
+  batch_size: 2
 
 output:
   output_dir: "/mnt/c/Users/yynk1/Downloads/denoising/inference_transformer_peak_classifier_imp"
