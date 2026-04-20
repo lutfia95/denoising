@@ -251,12 +251,16 @@ class MLPSpectrumDataset(Dataset):
             float(row[col_name])
             for col_name in self.config.features.spectrum_feature_columns
         ]
-        x = np.asarray(values, dtype=np.float32)
-        x = self.normalizer.normalize_spectrum_features(
-            x,
+        numeric_features = np.asarray(values, dtype=np.float32)
+        numeric_features = self.normalizer.normalize_spectrum_features(
+            numeric_features,
             enabled=self.config.features.normalize_spectrum_features,
         )
-        return x
+
+        instrument_features = _build_instrument_one_hot(row, self.config)
+        if instrument_features.size == 0:
+            return numeric_features
+        return np.concatenate([numeric_features, instrument_features], axis=0)
 
     def _build_target_vector(self, row: pd.Series) -> np.ndarray:
         targets = np.asarray(row[self.config.data.target_column], dtype=np.float32)
@@ -773,6 +777,39 @@ def fit_feature_normalizer(
     )
 
 
+def _build_instrument_one_hot(
+    row: pd.Series,
+    config: TrainingConfig,
+) -> np.ndarray:
+    if not config.features.use_instrument_label:
+        return np.empty((0,), dtype=np.float32)
+    if not config.features.instrument_names:
+        raise ValueError("instrument_names must be configured when use_instrument_label is true")
+
+    source_col = config.features.instrument_label_source_column
+    source_value = str(row[source_col])
+    instrument_vec = np.zeros((len(config.features.instrument_names),), dtype=np.float32)
+
+    matches = [
+        idx
+        for idx, instrument_name in enumerate(config.features.instrument_names)
+        if instrument_name in source_value
+    ]
+    if not matches:
+        raise ValueError(
+            f"Could not match instrument label in {source_col}={source_value!r} "
+            f"using configured names {config.features.instrument_names!r}"
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Ambiguous instrument label in {source_col}={source_value!r} "
+            f"using configured names {config.features.instrument_names!r}"
+        )
+
+    instrument_vec[matches[0]] = 1.0
+    return instrument_vec
+
+
 def compute_pos_weight(train_df: pd.DataFrame, config: TrainingConfig) -> float:
     if config.loss.pos_weight is not None:
         return float(config.loss.pos_weight)
@@ -917,6 +954,11 @@ def save_best_checkpoint(
             "normalize_peak_features": bool(config.features.normalize_peak_features),
             "normalize_spectrum_features": bool(
                 config.features.normalize_spectrum_features
+            ),
+            "use_instrument_label": bool(config.features.use_instrument_label),
+            "instrument_names": list(config.features.instrument_names),
+            "instrument_label_source_column": str(
+                config.features.instrument_label_source_column
             ),
         },
         "normalizer": {

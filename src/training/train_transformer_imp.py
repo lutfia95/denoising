@@ -710,6 +710,11 @@ def _save_resume_checkpoint_imp(
             "sort_raw_peak_inputs_by_mz": bool(config.features.sort_raw_peak_inputs_by_mz),
             "normalize_peak_features": bool(config.features.normalize_peak_features),
             "normalize_spectrum_features": bool(config.features.normalize_spectrum_features),
+            "use_instrument_label": bool(config.features.use_instrument_label),
+            "instrument_names": list(config.features.instrument_names),
+            "instrument_label_source_column": str(
+                config.features.instrument_label_source_column
+            ),
         },
         "normalizer": {
             "peak_mean": normalizer.peak_mean,

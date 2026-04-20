@@ -1,14 +1,14 @@
 data:
-  train_path: "../data/splits_1pct_filtered/train.parquet"
-  val_path: "../data/splits_1pct_filtered/val.parquet"
-  test_path: "../data/splits_1pct_filtered/test.parquet"
+  train_path: "../data/splits_6pct_filtered/train.parquet"
+  val_path: "../data/splits_6pct_filtered/val.parquet"
+  test_path: "../data/splits_6pct_filtered/test.parquet"
 
   target_column: "annotation_mask"
   use_training_weights: true
   weight_column: "weight"
 
 output:
-  output_dir: "../outputs/transformer_peak_classifier_imp_1pct_filtered_imp"
+  output_dir: "../outputs/transformer_peak_classifier_imp_6pct_filtered_03_new_instrument_encoder"
   save_best_model: true
   save_epoch_history: true
   save_metrics_summary: true
@@ -35,6 +35,12 @@ features:
     - "exp m/z"
     - "num_peaks"
     - "tic"
+  use_instrument_label: true
+  instrument_names:
+    - "_A_"
+    - "_Z_"
+    - "_R_"
+  instrument_label_source_column: "PeakListFileName"
 
   # Keep raw m/z as the one absolute coordinate channel. This preserves access to
   # the ordered spectrum axis without duplicating raw intensity and engineered m/z.
@@ -81,7 +87,7 @@ model:
 
 training:
   seed: 42
-  batch_size: 8
+  batch_size: 2
   num_workers: 2
   max_epochs: 60
   cpu_num_threads: 8
@@ -124,7 +130,7 @@ evaluation:
   primary_metric: "pr_auc"
   # Keep this as a starting point only. For a final denoising model, tune the
   # decision threshold on validation instead of hard-coding one operating point.
-  threshold_for_binary_metrics: 0.4
+  threshold_for_binary_metrics: 0.3
 
   report_metrics:
     - "pr_auc"
