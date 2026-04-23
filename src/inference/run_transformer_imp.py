@@ -64,7 +64,7 @@ def load_inference_config(config_path: str | Path) -> dict[str, Any]:
 
 
 def load_checkpoint(checkpoint_path: str | Path) -> dict[str, Any]:
-    checkpoint = torch.load(Path(checkpoint_path), map_location="cpu")
+    checkpoint = torch.load(Path(checkpoint_path), map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict):
         raise ValueError(f"Checkpoint at {checkpoint_path} is not a dictionary")
     required = {"model_state_dict", "model_config", "feature_config", "normalizer"}
