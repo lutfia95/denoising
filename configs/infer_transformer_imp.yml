@@ -1,0 +1,45 @@
+input:
+  mgf_path: "/mnt/c/Users/yynk1/Downloads/denoising/B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1.mgf"
+  peak_list_file_name: "B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1.mgf" #PeakListFileName
+
+model:
+  checkpoint_path: "/mnt/c/Users/yynk1/Downloads/denoising/transformer_peak_classifier_imp_1pct_filtered_imp_03_threshold/best_model.pt"
+
+features:
+  peak_feature_columns:
+    - "peak_feature_log_intensity"
+    - "peak_feature_relative_intensity"
+    - "peak_feature_mz_over_precursor"
+    - "peak_feature_delta_to_precursor"
+    - "peak_feature_delta_prev"
+    - "peak_feature_delta_next"
+  spectrum_feature_columns:
+    - "Charge"
+    - "exp m/z"
+    - "num_peaks"
+    - "tic"
+  use_instrument_label: false
+  use_raw_peak_mz: true
+  raw_peak_mz_column: "mz_arr"
+  use_raw_peak_intensity: false
+  raw_peak_intensity_column: "int_arr"
+  sort_raw_peak_inputs_by_mz: true
+  broadcast_spectrum_features_to_peaks: false
+  normalize_peak_features: true
+  normalize_spectrum_features: true
+
+evaluation:
+  use_checkpoint_threshold: true
+  threshold_for_binary_metrics: 0.3
+
+runtime:
+  device: "cuda"
+  batch_size: 2
+
+output:
+  output_dir: "/mnt/c/Users/yynk1/Downloads/denoising/inference_transformer_peak_classifier_imp"
+  write_filtered_mgf: true
+  write_dropped_peaks_report: true
+  dropped_peaks_report_name: "dropped_peaks.csv"
+  #default: drop low-probability peaks instead of writing zero-intensity peaks.
+  filtered_mgf_mode: "drop_below_threshold"
