@@ -676,6 +676,10 @@ def _save_resume_checkpoint(
             "instrument_label_source_column": str(
                 config.features.instrument_label_source_column
             ),
+            "use_recali_label": bool(config.features.use_recali_label),
+            "recali_label_source_column": str(
+                config.features.recali_label_source_column
+            ),
         },
         "normalizer": {
             "peak_mean": normalizer.peak_mean,
@@ -721,6 +725,10 @@ def _save_best_checkpoint(
             "instrument_names": list(config.features.instrument_names),
             "instrument_label_source_column": str(
                 config.features.instrument_label_source_column
+            ),
+            "use_recali_label": bool(config.features.use_recali_label),
+            "recali_label_source_column": str(
+                config.features.recali_label_source_column
             ),
         },
         "normalizer": {

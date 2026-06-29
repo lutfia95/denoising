@@ -1,6 +1,7 @@
 input:
   mgf_path: "/mnt/c/Users/yynk1/Downloads/denoising/B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1.mgf"
   peak_list_file_name: "B190717_12_HF_LS_IN_130_ECLP_DSSO_01_SCX23_hSAX05_rep1.mgf" #PeakListFileName
+  recali: null # set true/false when the checkpoint was trained with use_recali_label: true
 
 model:
   checkpoint_path: "/mnt/c/Users/yynk1/Downloads/denoising/transformer_peak_classifier_imp_1pct_filtered_imp_03_threshold/best_model.pt"
@@ -19,6 +20,8 @@ features:
     - "num_peaks"
     - "tic"
   use_instrument_label: false
+  use_recali_label: false
+  recali_label_source_column: "recali"
   use_raw_peak_mz: true
   raw_peak_mz_column: "mz_arr"
   use_raw_peak_intensity: false

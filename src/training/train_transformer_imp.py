@@ -91,6 +91,49 @@ class LengthBucketBatchSampler(Sampler[list[int]]):
         return math.ceil(len(self.lengths) / self.batch_size)
 
 
+def _validate_and_log_recali_labels(
+    split_frames: dict[str, pd.DataFrame],
+    config: TrainingConfig,
+) -> None:
+    if not config.features.use_recali_label:
+        return
+
+    source_column = config.features.recali_label_source_column
+    summaries: list[str] = []
+    for split_name, frame in split_frames.items():
+        if source_column not in frame.columns:
+            raise ValueError(
+                f"use_recali_label is true, but column {source_column!r} is missing "
+                f"from the {split_name} split"
+            )
+
+        values = frame[source_column]
+        missing_count = int(values.isna().sum())
+        if missing_count:
+            raise ValueError(
+                f"recali label column {source_column!r} contains {missing_count} "
+                f"missing values in the {split_name} split"
+            )
+        if not bool(values.isin([True, False, 1, 0]).all()):
+            invalid_values = values.loc[~values.isin([True, False, 1, 0])].unique()
+            raise ValueError(
+                f"recali label column {source_column!r} contains invalid values "
+                f"in the {split_name} split: {invalid_values.tolist()!r}"
+            )
+
+        true_count = int(values.astype(bool).sum())
+        false_count = int(len(values) - true_count)
+        summaries.append(
+            f"{split_name}: True={true_count}, False={false_count}, "
+            f"True ratio={true_count / max(len(values), 1):.2%}"
+        )
+
+    print(
+        f"[DATA] recali model feature enabled from column {source_column!r}: "
+        + "; ".join(summaries)
+    )
+
+
 def build_length_bucketed_loader(
     dataset: MLPSpectrumDataset,
     config: TrainingConfig,
@@ -195,6 +238,11 @@ def train_transformer_imp(
         train_df = pd.read_parquet(config.data.train_path)
         val_df = pd.read_parquet(config.data.val_path)
         test_df = pd.read_parquet(config.data.test_path)
+
+        _validate_and_log_recali_labels(
+            {"train": train_df, "val": val_df, "test": test_df},
+            config,
+        )
 
         normalizer = fit_feature_normalizer(train_df, config)
         train_dataset = MLPSpectrumDataset(train_df, config, normalizer, split_name="train")
@@ -714,6 +762,10 @@ def _save_resume_checkpoint_imp(
             "instrument_names": list(config.features.instrument_names),
             "instrument_label_source_column": str(
                 config.features.instrument_label_source_column
+            ),
+            "use_recali_label": bool(config.features.use_recali_label),
+            "recali_label_source_column": str(
+                config.features.recali_label_source_column
             ),
         },
         "normalizer": {

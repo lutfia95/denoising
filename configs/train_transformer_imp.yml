@@ -1,14 +1,14 @@
 data:
-  train_path: "../data/splits_6pct_filtered/train.parquet"
-  val_path: "../data/splits_6pct_filtered/val.parquet"
-  test_path: "../data/splits_6pct_filtered/test.parquet"
+  train_path: "../data/splits_5pct_filtered_new/train.parquet"
+  val_path: "../data/splits_5pct_filtered_new/val.parquet"
+  test_path: "../data/splits_5pct_filtered_new/test.parquet"
 
   target_column: "annotation_mask"
   use_training_weights: true
   weight_column: "weight"
 
 output:
-  output_dir: "../outputs/transformer_peak_classifier_imp_6pct_filtered_03_new_instrument_encoder"
+  output_dir: "../outputs/transformer_peak_classifier_imp_5pct_recali_instrument"
   save_best_model: true
   save_epoch_history: true
   save_metrics_summary: true
@@ -35,12 +35,14 @@ features:
     - "exp m/z"
     - "num_peaks"
     - "tic"
-  use_instrument_label: true
+  use_instrument_label: false # skip for now
   instrument_names:
     - "_A_"
     - "_Z_"
-    - "_R_"
+    - "_R_" # need to be fixed due to R_ and recali_
   instrument_label_source_column: "PeakListFileName"
+  use_recali_label: true
+  recali_label_source_column: "recali"
 
   # Keep raw m/z as the one absolute coordinate channel. This preserves access to
   # the ordered spectrum axis without duplicating raw intensity and engineered m/z.

@@ -1,10 +1,7 @@
 data:
-  train_path: "../data/splits_1pct_filtered/train.parquet"
-  val_path: "../data/splits_1pct_filtered/val.parquet"
-  test_path: "../data/splits_1pct_filtered/test.parquet"
-  # train_path: "../data/splits_6pct_filtered/train.parquet"
-  # val_path: "../data/splits_6pct_filtered/val.parquet"
-  # test_path: "../data/splits_6pct_filtered/test.parquet"
+  train_path: "../data/splits_5pct_filtered_new/train.parquet"
+  val_path: "../data/splits_5pct_filtered_new/val.parquet"
+  test_path: "../data/splits_5pct_filtered_new/test.parquet"
 
   target_column: "annotation_mask" # per-peak binary labels after flattening each spectrum into peak rows
   use_training_weights: true # optionally repeat a spectrum weight onto each peak row for AutoGluon
@@ -12,7 +9,7 @@ data:
 
 output:
   #output_dir: "../outputs/splits_6pct_filtered"
-  output_dir: "../outputs/splits_1pct_filtered"
+  output_dir: "../outputs/autogluon_imp_5pct_recali_instrument"
   predictor_subdir: "autogluon_predictor"
   unique_predictor_subdir: true # create a new predictor directory each run to avoid "Learner is already fit"
   save_metrics_summary: true
@@ -44,7 +41,7 @@ features:
   use_raw_peak_intensity: true
   raw_peak_intensity_column: "int_arr"
   sort_raw_peak_inputs_by_mz: true
-  broadcast_spectrum_features_to_peaks: false
+  broadcast_spectrum_features_to_peaks: true
   normalize_peak_features: true
   normalize_spectrum_features: true
   normalization_fit_split: "train"

@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.features.peak_features import PeakFeatureComputer, PeakFeatureConfig
+from src.features.recali_label import build_recali_label
 from src.features.spectrum_features import SpectrumFeatureComputer, SpectrumFeatureConfig
 from src.model.transformer_imp import PeakTransformerImpClassifier, PeakTransformerImpConfig
 from src.training.train_mlp import FeatureNormalizer
@@ -187,6 +188,22 @@ def _parse_charge(raw_charge: str) -> int:
     return int(token)
 
 
+def _parse_optional_bool(value: Any, field_name: str) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)) and int(value) in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    raise ValueError(f"{field_name} must be true or false, got {value!r}")
+
+
 def _build_instrument_one_hot(
     source_value: str,
     feature_config: dict[str, Any],
@@ -233,10 +250,12 @@ def _compare_feature_configs(config_features: dict[str, Any], checkpoint_feature
         "use_instrument_label",
         "instrument_names",
         "instrument_label_source_column",
+        "use_recali_label",
+        "recali_label_source_column",
     ]
     mismatches: list[str] = []
     for key in keys_to_compare:
-        if key == "use_instrument_label":
+        if key in {"use_instrument_label", "use_recali_label"}:
             config_value = bool(config_features.get(key, False))
             checkpoint_value = bool(checkpoint_features.get(key, False))
         elif key == "instrument_names":
@@ -248,6 +267,13 @@ def _compare_feature_configs(config_features: dict[str, Any], checkpoint_feature
             if not config_features.get("use_instrument_label", False):
                 config_value = None
             if not checkpoint_features.get("use_instrument_label", False):
+                checkpoint_value = None
+        elif key == "recali_label_source_column":
+            config_value = config_features.get(key, "recali")
+            checkpoint_value = checkpoint_features.get(key, "recali")
+            if not config_features.get("use_recali_label", False):
+                config_value = None
+            if not checkpoint_features.get("use_recali_label", False):
                 checkpoint_value = None
         else:
             config_value = config_features.get(key)
@@ -287,6 +313,7 @@ def build_record(
         annotation_mask=None,
         fdr=None,
         scan_id=scan_id,
+        recali=_parse_optional_bool(input_cfg.get("recali"), "input.recali"),
     )
 
 
@@ -356,6 +383,17 @@ def build_model_inputs(
     instrument_vector = _build_instrument_one_hot(instrument_source_value, feature_config)
     if instrument_vector.size > 0:
         spectrum_vector = np.concatenate([spectrum_vector, instrument_vector], axis=0)
+
+    recali_source_column = str(
+        feature_config.get("recali_label_source_column", "recali")
+    )
+    recali_vector = build_recali_label(
+        pd.Series({recali_source_column: processed_record.recali}),
+        enabled=bool(feature_config.get("use_recali_label", False)),
+        source_column=recali_source_column,
+    )
+    if recali_vector.size > 0:
+        spectrum_vector = np.concatenate([spectrum_vector, recali_vector], axis=0)
 
     return peak_matrix, spectrum_vector, processed_record
 

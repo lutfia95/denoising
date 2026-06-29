@@ -47,6 +47,8 @@ class FeatureSelectionConfig:
     use_instrument_label: bool = False
     instrument_names: list[str] = field(default_factory=list)
     instrument_label_source_column: str = "PeakListFileName"
+    use_recali_label: bool = False
+    recali_label_source_column: str = "recali"
 
 
 @dataclass(slots=True)
@@ -273,6 +275,10 @@ def load_training_config(config_path: str | Path) -> TrainingConfig:
         instrument_label_source_column=str(
             features_cfg.get("instrument_label_source_column", "PeakListFileName")
         ),
+        use_recali_label=bool(features_cfg.get("use_recali_label", False)),
+        recali_label_source_column=str(
+            features_cfg.get("recali_label_source_column", "recali")
+        ),
     )
     output = OutputConfig(
         output_dir=str(output_cfg.get("output_dir", "outputs/mlp_baseline")),
@@ -295,6 +301,7 @@ def load_training_config(config_path: str | Path) -> TrainingConfig:
         spectrum_input_dim=(
             len(features.spectrum_feature_columns)
             + (len(features.instrument_names) if features.use_instrument_label else 0)
+            + int(features.use_recali_label)
         ),
         hidden_dims=[int(x) for x in mlp_cfg.get("hidden_dims", [128, 64])],
         dropout=float(mlp_cfg.get("dropout", 0.1)),
@@ -452,6 +459,10 @@ def load_transformer_training_config(config_path: str | Path) -> TrainingConfig:
         instrument_label_source_column=str(
             features_cfg.get("instrument_label_source_column", "PeakListFileName")
         ),
+        use_recali_label=bool(features_cfg.get("use_recali_label", False)),
+        recali_label_source_column=str(
+            features_cfg.get("recali_label_source_column", "recali")
+        ),
     )
     output = OutputConfig(
         output_dir=str(output_cfg.get("output_dir", "outputs/transformer_baseline")),
@@ -474,6 +485,7 @@ def load_transformer_training_config(config_path: str | Path) -> TrainingConfig:
         spectrum_input_dim=(
             len(features.spectrum_feature_columns)
             + (len(features.instrument_names) if features.use_instrument_label else 0)
+            + int(features.use_recali_label)
         ),
         d_model=int(transformer_cfg.get("d_model", 96)),
         num_heads=int(transformer_cfg.get("num_heads", 4)),
@@ -637,6 +649,10 @@ def load_transformer_imp_training_config(config_path: str | Path) -> TrainingCon
         instrument_label_source_column=str(
             features_cfg.get("instrument_label_source_column", "PeakListFileName")
         ),
+        use_recali_label=bool(features_cfg.get("use_recali_label", False)),
+        recali_label_source_column=str(
+            features_cfg.get("recali_label_source_column", "recali")
+        ),
     )
     output = OutputConfig(
         output_dir=str(
@@ -661,6 +677,7 @@ def load_transformer_imp_training_config(config_path: str | Path) -> TrainingCon
         spectrum_input_dim=(
             len(features.spectrum_feature_columns)
             + (len(features.instrument_names) if features.use_instrument_label else 0)
+            + int(features.use_recali_label)
         ),
         d_model=int(transformer_cfg.get("d_model", 160)),
         num_heads=int(transformer_cfg.get("num_heads", 8)),

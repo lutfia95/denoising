@@ -24,6 +24,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 
 from src.config import TrainingConfig
+from src.features.recali_label import build_recali_label
 from src.model.mlp import MLPPeakClassifier
 from src.training.logging_utils import tee_output
 
@@ -258,9 +259,19 @@ class MLPSpectrumDataset(Dataset):
         )
 
         instrument_features = _build_instrument_one_hot(row, self.config)
-        if instrument_features.size == 0:
+        recali_feature = build_recali_label(
+            row,
+            enabled=self.config.features.use_recali_label,
+            source_column=self.config.features.recali_label_source_column,
+        )
+        categorical_features = [
+            feature
+            for feature in (instrument_features, recali_feature)
+            if feature.size > 0
+        ]
+        if not categorical_features:
             return numeric_features
-        return np.concatenate([numeric_features, instrument_features], axis=0)
+        return np.concatenate([numeric_features, *categorical_features], axis=0)
 
     def _build_target_vector(self, row: pd.Series) -> np.ndarray:
         targets = np.asarray(row[self.config.data.target_column], dtype=np.float32)
@@ -959,6 +970,10 @@ def save_best_checkpoint(
             "instrument_names": list(config.features.instrument_names),
             "instrument_label_source_column": str(
                 config.features.instrument_label_source_column
+            ),
+            "use_recali_label": bool(config.features.use_recali_label),
+            "recali_label_source_column": str(
+                config.features.recali_label_source_column
             ),
         },
         "normalizer": {
