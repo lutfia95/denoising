@@ -63,6 +63,13 @@ class SpectrumProcessor:
         else:
             fdr = float(fdr)
 
+        recali_value = row.get("recali")
+        recali = (
+            None
+            if recali_value is None or pd.isna(recali_value)
+            else bool(recali_value)
+        )
+
         return SpectrumRecord(
             search_id=row["SearchID"],
             peak_list_file_name=str(row["PeakListFileName"]),
@@ -73,7 +80,8 @@ class SpectrumProcessor:
             precursor_mz=float(row["exp m/z"]),
             annotation_mask=annotation_mask,
             fdr=fdr,
-            scan_id=row["ScanId"],
+            scan_id=row["scan"],
+            recali=recali,
         )
 
     @staticmethod

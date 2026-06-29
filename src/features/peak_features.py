@@ -106,6 +106,7 @@ class PeakFeatureComputer:
             annotation_mask=annotation_mask,
             fdr=record.fdr,
             scan_id=record.scan_id,
+            recali=record.recali,
         )
 
     @staticmethod

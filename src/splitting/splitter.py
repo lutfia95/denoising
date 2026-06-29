@@ -16,6 +16,11 @@ class SplitConfig:
     test_fraction: float = 0.15
     random_seed: int = 42
     split_method: str = "PeakListFileName"
+    stratify_by_recali: bool = False
+    length_weight: bool = False
+    length_weight_eps: float = 1.0
+    length_weight_min: float = 0.5
+    length_weight_max: float = 2.0
 
     def validate(self) -> None:
         total = self.train_fraction + self.val_fraction + self.test_fraction
@@ -34,6 +39,14 @@ class SplitConfig:
         if self.split_method not in allowed:
             raise ValueError(
                 f"split_method must be one of {sorted(allowed)}, got {self.split_method!r}"
+            )
+        if self.length_weight_eps <= 0.0:
+            raise ValueError("length_weight_eps must be > 0")
+        if self.length_weight_min <= 0.0:
+            raise ValueError("length_weight_min must be > 0")
+        if self.length_weight_max < self.length_weight_min:
+            raise ValueError(
+                "length_weight_max must be greater than or equal to length_weight_min"
             )
 
 
@@ -73,11 +86,7 @@ class GroupedSpectrumSplitter:
                 f"split_method={self.config.split_method!r}"
             )
 
-        rng = random.Random(self.config.random_seed)
-        shuffled_groups = unique_groups[:]
-        rng.shuffle(shuffled_groups)
-
-        n_groups = len(shuffled_groups)
+        n_groups = len(unique_groups)
         n_train = max(1, int(round(n_groups * self.config.train_fraction)))
         n_val = max(1, int(round(n_groups * self.config.val_fraction)))
         n_test = n_groups - n_train - n_val
@@ -89,9 +98,23 @@ class GroupedSpectrumSplitter:
             elif n_val > 1:
                 n_val -= 1
 
-        train_groups = set(shuffled_groups[:n_train])
-        val_groups = set(shuffled_groups[n_train:n_train + n_val])
-        test_groups = set(shuffled_groups[n_train + n_val:])
+        rng = random.Random(self.config.random_seed)
+        shuffled_groups = unique_groups[:]
+        rng.shuffle(shuffled_groups)
+
+        if self.config.stratify_by_recali and any(
+            ps.record.recali is not None for ps in spectra
+        ):
+            train_groups, val_groups, test_groups = self._assign_recali_stratified_groups(
+                spectra=spectra,
+                groups=shuffled_groups,
+                group_capacities=(n_train, n_val, n_test),
+                rng=rng,
+            )
+        else:
+            train_groups = set(shuffled_groups[:n_train])
+            val_groups = set(shuffled_groups[n_train:n_train + n_val])
+            test_groups = set(shuffled_groups[n_train + n_val:])
 
         if not train_groups or not val_groups or not test_groups:
             raise RuntimeError("One of the splits is empty after group assignment")
@@ -146,6 +169,108 @@ class GroupedSpectrumSplitter:
             group_to_split_df=group_to_split_df,
             summary_df=summary_df,
         )
+
+    def _assign_recali_stratified_groups(
+        self,
+        spectra: list[ProcessedSpectrum],
+        groups: list[str | int],
+        group_capacities: tuple[int, int, int],
+        rng: random.Random,
+    ) -> tuple[set[str | int], set[str | int], set[str | int]]:
+        """Balance recali row counts while preserving group boundaries."""
+        split_names = ("train", "val", "test")
+        fractions = {
+            "train": self.config.train_fraction,
+            "val": self.config.val_fraction,
+            "test": self.config.test_fraction,
+        }
+        capacities = dict(zip(split_names, group_capacities))
+        assignments: dict[str, set[str | int]] = {
+            split_name: set() for split_name in split_names
+        }
+        counts = {
+            split_name: {"total": 0, "true": 0, "false": 0}
+            for split_name in split_names
+        }
+        group_counts = {
+            group: {"total": 0, "true": 0, "false": 0}
+            for group in groups
+        }
+        for ps in spectra:
+            stats = group_counts[self._get_group_key(ps)]
+            stats["total"] += 1
+            if ps.record.recali is True:
+                stats["true"] += 1
+            elif ps.record.recali is False:
+                stats["false"] += 1
+
+        global_counts = {
+            metric: sum(stats[metric] for stats in group_counts.values())
+            for metric in ("total", "true", "false")
+        }
+        targets = {
+            split_name: {
+                metric: fractions[split_name] * global_counts[metric]
+                for metric in global_counts
+            }
+            for split_name in split_names
+        }
+
+        # Randomization resolves exact ties reproducibly. Sorting large and strongly
+        # single-class groups first gives the greedy allocator the hardest choices first.
+        ordered_groups = groups[:]
+        rng.shuffle(ordered_groups)
+        ordered_groups.sort(
+            key=lambda group: (
+                max(group_counts[group]["true"], group_counts[group]["false"]),
+                group_counts[group]["total"],
+            ),
+            reverse=True,
+        )
+
+        for group in ordered_groups:
+            candidates = [
+                split_name
+                for split_name in split_names
+                if len(assignments[split_name]) < capacities[split_name]
+            ]
+            rng.shuffle(candidates)
+            chosen = min(
+                candidates,
+                key=lambda split_name: self._recali_assignment_cost(
+                    candidate_split=split_name,
+                    group_stats=group_counts[group],
+                    current_counts=counts,
+                    targets=targets,
+                ),
+            )
+            assignments[chosen].add(group)
+            for metric in ("total", "true", "false"):
+                counts[chosen][metric] += group_counts[group][metric]
+
+        return (
+            assignments["train"],
+            assignments["val"],
+            assignments["test"],
+        )
+
+    @staticmethod
+    def _recali_assignment_cost(
+        candidate_split: str,
+        group_stats: dict[str, int],
+        current_counts: dict[str, dict[str, int]],
+        targets: dict[str, dict[str, float]],
+    ) -> float:
+        cost = 0.0
+        for split_name, split_counts in current_counts.items():
+            for metric in ("total", "true", "false"):
+                value = split_counts[metric]
+                if split_name == candidate_split:
+                    value += group_stats[metric]
+                target = targets[split_name][metric]
+                if target > 0.0:
+                    cost += ((value - target) / target) ** 2
+        return cost
 
     def write_split_parquets(
         self,
@@ -222,7 +347,18 @@ class GroupedSpectrumSplitter:
             "n_rows": total_rows,
             "n_unique_spectra": len(unique_spectra_keys),
             "n_unique_groups": unique_groups,
+            "n_recali_true": sum(ps.record.recali is True for ps in spectra),
+            "n_recali_false": sum(ps.record.recali is False for ps in spectra),
+            "n_recali_missing": sum(ps.record.recali is None for ps in spectra),
+            "recali_true_fraction": self._recali_true_fraction(spectra),
         }
+
+    @staticmethod
+    def _recali_true_fraction(spectra: list[ProcessedSpectrum]) -> float | None:
+        n_true = sum(ps.record.recali is True for ps in spectra)
+        n_false = sum(ps.record.recali is False for ps in spectra)
+        n_known = n_true + n_false
+        return None if n_known == 0 else n_true / n_known
 
     def _processed_spectra_to_df(
         self,
@@ -232,6 +368,10 @@ class GroupedSpectrumSplitter:
         rows: list[dict[str, Any]] = []
 
         for ps in spectra:
+            length_weight = self._compute_length_weight(ps)
+            fdr_weight = float(ps.fdr_weight.weight)
+            final_weight = fdr_weight * length_weight
+
             rows.append(
                 {
                     "split": split_name, # train / test / val
@@ -251,8 +391,11 @@ class GroupedSpectrumSplitter:
                         else ps.record.annotation_mask.tolist()
                     ),
                     "fdr": ps.record.fdr, #Original FDR
+                    "recali": ps.record.recali,
                     "clipped_fdr": ps.fdr_weight.clipped_fdr, # FDR after clipping into the configured allowed range
-                    "weight": ps.fdr_weight.weight, # Training weight derived from the clipped FDR value
+                    "fdr_weight": fdr_weight, # Weight derived only from the configured FDR rule
+                    "length_weight": length_weight, # Optional per-spectrum true/false balance factor
+                    "weight": final_weight, # Final training weight after combining the active components
                     "num_peaks": ps.spectrum_features.num_peaks, # Number of peaks in the processed spectrum
                     "tic": ps.spectrum_features.tic, # Total ion current, which is the sum of spectrum' intensities
                     "peak_feature_mz": ps.peak_features.mz.tolist(), # Peak m/z values used in the peak feature matrix
@@ -292,34 +435,22 @@ class GroupedSpectrumSplitter:
 
         return pd.DataFrame(rows)
 
-    def _processed_spectra_to_training_df(
-        self,
-        spectra: list[ProcessedSpectrum],
-        split_name: str,
-    ) -> pd.DataFrame:
-        rows: list[dict[str, Any]] = []
+    def _compute_length_weight(self, ps: ProcessedSpectrum) -> float:
+        if not self.config.length_weight:
+            return 1.0
 
-        for ps in spectra:
-            rows.append(
-                {
-                    "split": split_name,
-                    "group_split_method": self.config.split_method,
-                    "group_split_key": self._get_group_key(ps),
-                    "SearchID": ps.record.search_id,
-                    "PeakListFileName": ps.record.peak_list_file_name,
-                    "scan": ps.record.scan,
-                    "ScanId": ps.record.scan_id,
-                    "charge": ps.spectrum_features.charge,
-                    "precursor_mz": ps.spectrum_features.precursor_mz,
-                    "num_peaks": ps.spectrum_features.num_peaks,
-                    "tic": ps.spectrum_features.tic,
-                    "spectrum_features": ps.spectrum_features.as_array(),
-                    "peak_features": ps.peak_features.as_matrix(),
-                    "annotation_mask": ps.record.annotation_mask,
-                    "weight": ps.fdr_weight.weight,
-                    "fdr": ps.record.fdr,
-                    "clipped_fdr": ps.fdr_weight.clipped_fdr,
-                }
+        annotation_mask = ps.record.annotation_mask
+        if annotation_mask is None:
+            return 1.0
+
+        n_true = int(annotation_mask.sum())
+        n_false = int(annotation_mask.shape[0] - n_true)
+        eps = float(self.config.length_weight_eps)
+        raw_weight = (n_true + eps) / (n_false + eps)
+
+        return float(
+            min(
+                max(raw_weight, self.config.length_weight_min),
+                self.config.length_weight_max,
             )
-
-        return pd.DataFrame(rows)
+        )
