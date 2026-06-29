@@ -97,6 +97,7 @@ class PeakFeatureComputer:
             annotation_mask=annotation_mask,
             fdr=record.fdr,
             scan_id=record.scan_id,
+            recali=record.recali,
         )
 
     def _compute_neighbor_deltas(self, mz_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -16,6 +16,7 @@ class SplitConfig:
     test_fraction: float = 0.15
     random_seed: int = 42
     split_method: str = "PeakListFileName"
+    stratify_by_recali: bool = False
     length_weight: bool = False
     length_weight_eps: float = 1.0
     length_weight_min: float = 0.5
@@ -85,11 +86,7 @@ class GroupedSpectrumSplitter:
                 f"split_method={self.config.split_method!r}"
             )
 
-        rng = random.Random(self.config.random_seed)
-        shuffled_groups = unique_groups[:]
-        rng.shuffle(shuffled_groups)
-
-        n_groups = len(shuffled_groups)
+        n_groups = len(unique_groups)
         n_train = max(1, int(round(n_groups * self.config.train_fraction)))
         n_val = max(1, int(round(n_groups * self.config.val_fraction)))
         n_test = n_groups - n_train - n_val
@@ -101,9 +98,23 @@ class GroupedSpectrumSplitter:
             elif n_val > 1:
                 n_val -= 1
 
-        train_groups = set(shuffled_groups[:n_train])
-        val_groups = set(shuffled_groups[n_train:n_train + n_val])
-        test_groups = set(shuffled_groups[n_train + n_val:])
+        rng = random.Random(self.config.random_seed)
+        shuffled_groups = unique_groups[:]
+        rng.shuffle(shuffled_groups)
+
+        if self.config.stratify_by_recali and any(
+            ps.record.recali is not None for ps in spectra
+        ):
+            train_groups, val_groups, test_groups = self._assign_recali_stratified_groups(
+                spectra=spectra,
+                groups=shuffled_groups,
+                group_capacities=(n_train, n_val, n_test),
+                rng=rng,
+            )
+        else:
+            train_groups = set(shuffled_groups[:n_train])
+            val_groups = set(shuffled_groups[n_train:n_train + n_val])
+            test_groups = set(shuffled_groups[n_train + n_val:])
 
         if not train_groups or not val_groups or not test_groups:
             raise RuntimeError("One of the splits is empty after group assignment")
@@ -157,6 +168,108 @@ class GroupedSpectrumSplitter:
             group_to_split_df=group_to_split_df,
             summary_df=summary_df,
         )
+
+    def _assign_recali_stratified_groups(
+        self,
+        spectra: list[ProcessedSpectrum],
+        groups: list[str | int],
+        group_capacities: tuple[int, int, int],
+        rng: random.Random,
+    ) -> tuple[set[str | int], set[str | int], set[str | int]]:
+        """Balance recali row counts while preserving group boundaries."""
+        split_names = ("train", "val", "test")
+        fractions = {
+            "train": self.config.train_fraction,
+            "val": self.config.val_fraction,
+            "test": self.config.test_fraction,
+        }
+        capacities = dict(zip(split_names, group_capacities))
+        assignments: dict[str, set[str | int]] = {
+            split_name: set() for split_name in split_names
+        }
+        counts = {
+            split_name: {"total": 0, "true": 0, "false": 0}
+            for split_name in split_names
+        }
+        group_counts = {
+            group: {"total": 0, "true": 0, "false": 0}
+            for group in groups
+        }
+        for ps in spectra:
+            stats = group_counts[self._get_group_key(ps)]
+            stats["total"] += 1
+            if ps.record.recali is True:
+                stats["true"] += 1
+            elif ps.record.recali is False:
+                stats["false"] += 1
+
+        global_counts = {
+            metric: sum(stats[metric] for stats in group_counts.values())
+            for metric in ("total", "true", "false")
+        }
+        targets = {
+            split_name: {
+                metric: fractions[split_name] * global_counts[metric]
+                for metric in global_counts
+            }
+            for split_name in split_names
+        }
+
+        # Randomization resolves exact ties reproducibly. Sorting large and strongly
+        # single-class groups first gives the greedy allocator the hardest choices first.
+        ordered_groups = groups[:]
+        rng.shuffle(ordered_groups)
+        ordered_groups.sort(
+            key=lambda group: (
+                max(group_counts[group]["true"], group_counts[group]["false"]),
+                group_counts[group]["total"],
+            ),
+            reverse=True,
+        )
+
+        for group in ordered_groups:
+            candidates = [
+                split_name
+                for split_name in split_names
+                if len(assignments[split_name]) < capacities[split_name]
+            ]
+            rng.shuffle(candidates)
+            chosen = min(
+                candidates,
+                key=lambda split_name: self._recali_assignment_cost(
+                    candidate_split=split_name,
+                    group_stats=group_counts[group],
+                    current_counts=counts,
+                    targets=targets,
+                ),
+            )
+            assignments[chosen].add(group)
+            for metric in ("total", "true", "false"):
+                counts[chosen][metric] += group_counts[group][metric]
+
+        return (
+            assignments["train"],
+            assignments["val"],
+            assignments["test"],
+        )
+
+    @staticmethod
+    def _recali_assignment_cost(
+        candidate_split: str,
+        group_stats: dict[str, int],
+        current_counts: dict[str, dict[str, int]],
+        targets: dict[str, dict[str, float]],
+    ) -> float:
+        cost = 0.0
+        for split_name, split_counts in current_counts.items():
+            for metric in ("total", "true", "false"):
+                value = split_counts[metric]
+                if split_name == candidate_split:
+                    value += group_stats[metric]
+                target = targets[split_name][metric]
+                if target > 0.0:
+                    cost += ((value - target) / target) ** 2
+        return cost
 
     def write_split_parquets(
         self,
@@ -217,7 +330,18 @@ class GroupedSpectrumSplitter:
             "n_rows": total_rows,
             "n_unique_spectra": len(unique_spectra_keys),
             "n_unique_groups": unique_groups,
+            "n_recali_true": sum(ps.record.recali is True for ps in spectra),
+            "n_recali_false": sum(ps.record.recali is False for ps in spectra),
+            "n_recali_missing": sum(ps.record.recali is None for ps in spectra),
+            "recali_true_fraction": self._recali_true_fraction(spectra),
         }
+
+    @staticmethod
+    def _recali_true_fraction(spectra: list[ProcessedSpectrum]) -> float | None:
+        n_true = sum(ps.record.recali is True for ps in spectra)
+        n_false = sum(ps.record.recali is False for ps in spectra)
+        n_known = n_true + n_false
+        return None if n_known == 0 else n_true / n_known
 
     def _processed_spectra_to_df(
         self,
@@ -250,6 +374,7 @@ class GroupedSpectrumSplitter:
                         else ps.record.annotation_mask.tolist()
                     ),
                     "fdr": ps.record.fdr, #Original FDR
+                    "recali": ps.record.recali,
                     "clipped_fdr": ps.fdr_weight.clipped_fdr, # FDR after clipping into the configured allowed range
                     "fdr_weight": fdr_weight, # Weight derived only from the configured FDR rule
                     "length_weight": length_weight, # Optional per-spectrum true/false balance factor

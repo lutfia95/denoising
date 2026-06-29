@@ -18,6 +18,7 @@ class SpectrumRecord:
     annotation_mask: np.ndarray | None
     fdr: float | None
     scan_id: str | int  # maybe useful later for augmentation / tracking
+    recali: bool | None = None
 
     def validate(self) -> None:
         if self.mz_arr.ndim != 1:
