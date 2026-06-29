@@ -46,10 +46,10 @@ features:
   # the ordered spectrum axis without duplicating raw intensity and engineered m/z.
   use_raw_peak_mz: true
   raw_peak_mz_column: "mz_arr"
-  use_raw_peak_intensity: false
+  use_raw_peak_intensity: true # this might use more vram! 
   raw_peak_intensity_column: "int_arr"
   sort_raw_peak_inputs_by_mz: true
-  broadcast_spectrum_features_to_peaks: false
+  broadcast_spectrum_features_to_peaks: true # this might use more vram! 
   normalize_peak_features: true
   normalize_spectrum_features: true
   normalization_fit_split: "train"
