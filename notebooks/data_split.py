@@ -56,8 +56,35 @@ processed_spectra = processor.process_dataframe(FDR_6pct_DF)
 splitter = GroupedSpectrumSplitter(APP_CONFIG.split)
 split_result = splitter.split(processed_spectra)
 
-print(split_result.summary_df)
-
 OUTPUT_DIR = Path.cwd().parent / "data" / "splits_5pct_filtered_new"
 #OUTPUT_DIR = Path.cwd().parent / "data" / "splits_6pct_filtered"
 splitter.write_split_parquets(split_result, OUTPUT_DIR)
+
+split_summary = split_result.summary_df.copy()
+split_summary.insert(
+    3,
+    "row_fraction",
+    split_summary["n_rows"] / split_summary["n_rows"].sum(),
+)
+
+print("\nGenerated split summary")
+print(
+    split_summary.to_string(
+        index=False,
+        formatters={
+            "row_fraction": lambda value: f"{value:.2%}",
+            "recali_true_fraction": lambda value: f"{value:.2%}",
+        },
+    )
+)
+print(f"\nSplit parquet files written to: {OUTPUT_DIR.resolve()}")
+
+# {'rows': 60127, 'columns': 11, 'duplicate_rows': 14538}
+# (60127, 11)
+# ['SearchID', 'PeakListFileName', 'scan', 'mz_arr', 'int_arr', 'Charge', 'exp m/z', 'annotation_mask', 'fdr', 'raw_raptor', 'recali']
+
+# Generated split summary
+# split     split_method  n_rows row_fraction  n_unique_spectra  n_unique_groups  n_recali_true  n_recali_false  n_recali_missing recali_true_fraction
+# train PeakListFileName   41703       69.36%             29783              206          30837           10866                 0               73.94%
+#   val PeakListFileName    9212       15.32%              7422               44           6837            2375                 0               74.22%
+#  test PeakListFileName    9212       15.32%              8314               44           6837            2375                 0               74.22%
