@@ -1,7 +1,7 @@
 data:
-  train_path: "../data/splits_5pct_filtered_new/train.parquet"
-  val_path: "../data/splits_5pct_filtered_new/val.parquet"
-  test_path: "../data/splits_5pct_filtered_new/test.parquet"
+  train_path: "./data/splits_5pct_filtered_new/train.parquet"
+  val_path: "./data/splits_5pct_filtered_new/val.parquet"
+  test_path: "./data/splits_5pct_filtered_new/test.parquet"
 
   target_column: "annotation_mask"
   use_training_weights: true
@@ -101,7 +101,7 @@ training:
   compile_model: false
   cache_dataset_in_memory: true
   save_latest_checkpoint: true
-  resume_from_checkpoint: null
+  resume_from_checkpoint: "last_checkpoint.pt"
 
   optimizer:
     name: "adamw"

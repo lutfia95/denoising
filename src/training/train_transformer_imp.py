@@ -277,7 +277,7 @@ def train_transformer_imp(
         resume_state: dict[str, object] | None = None
         if resume_checkpoint is not None:
             print(f"[DEV] Resuming improved transformer training from: {resume_checkpoint}")
-            resume_state = torch.load(resume_checkpoint, map_location="cpu")
+            resume_state = torch.load(resume_checkpoint, map_location="cpu", weights_only = False)
             checkpoint_model_state = resume_state.get("model_state_dict")
             if not isinstance(checkpoint_model_state, dict):
                 raise ValueError(
