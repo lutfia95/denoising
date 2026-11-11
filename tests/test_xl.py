@@ -14,9 +14,11 @@ from split_data_xl import split_data
 from src.inference.run_xl import build_sample, iter_mgf, run_inference
 from src.model.xl import (MassAwarePeakAttention, PairwiseMassBias, XLConfig,
                           XLPeakClassifier, model_inputs)
-from src.training.train_xl import sample_weights, select_threshold, train
-from src.xl_data import (XLFeatureConfig, XLNormalizer, XLSpectrumDataset,
-                         make_features, prepare_arrays, previous_indices, read_config, xl_collate)
+from src.training.train_xl import WeightEMA, sample_weights, select_threshold, train
+from src.xl_data import (PEAK_FEATURES_V2, XLFeatureConfig, XLNormalizer, XLSpectrumDataset,
+                         augment_spectrum, complement_distance, complement_target, make_features,
+                         model_feature_names, prepare_arrays, previous_indices, read_config,
+                         window_max, xl_collate)
 
 
 def make_fixture(root):
@@ -51,12 +53,13 @@ def make_fixture(root):
                                   {"name": "one", "schema": "annotations", "path": "annotations.parquet"}],
                      "split_dir": "splits"},
             "split": {"group_by": "project", "fractions": [0.7, 0.15, 0.15], "seed": 42, "row_group_size": 8},
-            "features": {"histogram_bins": 8, "previous_spectra": 2},
+            "features": {"histogram_bins": 8, "previous_spectra": 2, "peak_feature_set": "v2"},
             "model": {"d_model": 24, "num_heads": 3, "num_layers": 2, "local_window": 4,
-                      "global_slots": 2, "mz_frequencies": 4, "dropout": 0.0},
+                      "global_slots": 2, "mz_frequencies": 4, "dropout": 0.0, "use_complement_bias": True},
             "training": {"seed": 42, "device": "cpu", "cpu_num_threads": 1, "max_epochs": 1,
                          "batch_size": 4, "gradient_accumulation_steps": 2, "learning_rate": 0.003,
-                         "max_train_peaks": 12, "num_workers": 0},
+                         "max_train_peaks": 12, "num_workers": 0, "ema_decay": 0.9,
+                         "augment_ppm_std": 5.0, "augment_intensity_log_std": 0.1},
             "evaluation": {"max_sampled_peaks_per_source": None, "intensity_baseline": True},
             "output": {"output_dir": "model"}}
 
@@ -82,6 +85,96 @@ class XLTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepare_arrays([1], [2], [2])
 
+    def test_v2_features_match_brute_force(self):
+        rng = np.random.default_rng(5)
+        mz = np.sort(rng.uniform(100, 1500, 60))
+        intensity = rng.uniform(0, 100, 60)
+        intensity[[3, 7]] = 42.0  # ties share one rank
+        charge, precursor = 2, 700.0
+        target = complement_target(precursor, charge)
+        mz[10] = 400.0
+        mz = np.sort(np.r_[mz[:-1], target - 400.0 + 0.003])  # exact partner of 400 at 3 mDa
+        feature = XLFeatureConfig(peak_feature_set="v2", local_intensity_window=50.0)
+        peak, _, _ = make_features(mz, intensity, charge, precursor, feature)
+        self.assertEqual(peak.shape, (60, len(PEAK_FEATURES_V2)))
+        self.assertTrue(np.isfinite(peak).all())
+        rank = peak[:, PEAK_FEATURES_V2.index("intensity_rank")]
+        self.assertAlmostEqual(float(rank[np.argmax(intensity)]), 1.0, places=6)
+        self.assertAlmostEqual(float(rank[np.argmin(intensity)]), 0.0, places=6)
+        self.assertEqual(rank[3], rank[7])
+        local_max = np.array([intensity[np.abs(mz - m) <= 50].max() for m in mz])
+        np.testing.assert_allclose(window_max(intensity, mz, 50.0), local_max)
+        np.testing.assert_allclose(peak[:, PEAK_FEATURES_V2.index("local_relative_intensity")],
+                                   intensity / local_max, rtol=1e-6)
+        brute = np.array([min(min((abs(mz[j] - (target - mz[i])) for j in range(len(mz)) if j != i)), 5.0)
+                          for i in range(len(mz))])
+        np.testing.assert_allclose(complement_distance(mz, target), brute, atol=1e-9)
+        i = int(np.argmin(np.abs(mz - 400.0)))
+        self.assertAlmostEqual(float(complement_distance(mz, target)[i]), 0.003, places=6)
+        # A peak at exactly target/2 must not count itself as its own complement.
+        self_pair = np.array([100.0, target / 2, 900.0])
+        self.assertGreater(complement_distance(self_pair, target)[1], 0)
+        self.assertEqual(make_features(mz, intensity, charge, precursor, XLFeatureConfig())[0].shape[1], 6)
+
+    def test_augmentation_is_deterministic_and_order_preserving(self):
+        mz, intensity = np.array([100.0, 200.0, 300.0]), np.array([1.0, 5.0, 2.0])
+        first = augment_spectrum(mz, intensity, 500.0, np.random.default_rng(1), 5.0, 0.1)
+        again = augment_spectrum(mz, intensity, 500.0, np.random.default_rng(1), 5.0, 0.1)
+        for a, b in zip(first, again):
+            np.testing.assert_array_equal(a, b)
+        shifted, jittered, precursor = first
+        self.assertTrue(np.all(np.diff(shifted) > 0))
+        ppm = (shifted / mz - 1) * 1e6
+        self.assertAlmostEqual(float(np.ptp(ppm)), 0.0, places=6)  # one global shift
+        self.assertAlmostEqual(precursor / 500.0, shifted[0] / mz[0], places=12)
+        self.assertLess(abs(ppm[0]), 50)
+        self.assertFalse(np.allclose(jittered, intensity))
+        same = augment_spectrum(mz, intensity, 500.0, np.random.default_rng(1), 0.0, 0.0)
+        np.testing.assert_array_equal(same[0], mz)
+        np.testing.assert_array_equal(same[1], intensity)
+
+    def test_complement_bias_sees_mass_sums(self):
+        config = XLConfig(d_model=24, num_heads=3, pairwise_mass_frequencies=4, pairwise_mass_hidden_dim=8,
+                          use_complement_bias=True, full_attention_max_peaks=32, dropout=0,
+                          gradient_checkpointing=False)
+        attention = MassAwarePeakAttention(config).eval()
+        tokens = torch.randn(1, 4, 24)
+        mz = torch.tensor([[200.0, 350.0, 500.0, 900.0]])
+        padding = torch.zeros(1, 4, dtype=torch.bool)
+        target = 1100.0
+        complement = target - mz
+        # Zero-initialized bias leaves attention unchanged at the start of training.
+        reference = deepcopy(attention)
+        reference.complement_bias = None
+        reference.mass_bias.load_state_dict(attention.mass_bias.state_dict())
+        with torch.no_grad():
+            torch.testing.assert_close(attention.forward_peaks(tokens, mz, padding, mz, 0, complement),
+                                       reference.forward_peaks(tokens, mz, padding, mz, 0))
+        # Peaks 200 and 900 sum to the target: their complement offset is exactly 0.
+        bias = attention.complement_bias
+        torch.nn.init.normal_(bias.network[-1].weight, std=0.1)
+        values = bias(complement, mz)[0, 0]
+        torch.testing.assert_close(values[0, 3], values[3, 0])
+        self.assertFalse(torch.isclose(values[0, 3], values[0, 2]))
+        with self.assertRaises(ValueError):
+            attention.forward_peaks(tokens, mz, padding, mz, 0)
+
+    def test_weight_ema(self):
+        model = torch.nn.Linear(2, 1)
+        with torch.no_grad():
+            model.weight.fill_(0)
+        ema = WeightEMA(model, 0.5)
+        with torch.no_grad():
+            model.weight.fill_(1)
+        ema.update(model)  # decay = min(0.5, 2 / 11)
+        torch.testing.assert_close(ema.model.weight, torch.full((1, 2), 9 / 11))
+        for _ in range(30):
+            ema.update(model)
+        torch.testing.assert_close(ema.model.weight, torch.ones(1, 2), atol=1e-6, rtol=0)
+        self.assertFalse(ema.model.weight.requires_grad)
+        with self.assertRaises(ValueError):
+            WeightEMA(model, 1.0)
+
     def test_history_boundaries_and_gaps(self):
         frame = pd.DataFrame({"run_id": ["a", "a", "b", "a", "a"], "scan": [20, 10, 5, 20, 40]})
         history = previous_indices(frame, XLFeatureConfig(previous_spectra=2))
@@ -94,14 +187,18 @@ class XLTest(unittest.TestCase):
 
     def test_large_default_and_legacy_config(self):
         config, _ = read_config("config/train_xl.yml")
-        model_config = XLConfig(**config["model"])
+        features = XLFeatureConfig(**config["features"])
+        self.assertEqual(features.peak_feature_set, "v2")
+        model_config = XLConfig(peak_input_dim=len(model_feature_names(features)), **config["model"])
         self.assertEqual((model_config.d_model, model_config.num_heads, model_config.num_layers,
-                          model_config.global_slots), (256, 8, 6, 32))
+                          model_config.global_slots, model_config.peak_input_dim), (256, 8, 6, 32, 7))
+        self.assertTrue(model_config.use_complement_bias)
         model = XLPeakClassifier(model_config)
-        self.assertEqual(sum(p.numel() for p in model.parameters()), 8232481)
+        self.assertEqual(sum(p.numel() for p in model.parameters()), 8235329)
         legacy = XLConfig.from_checkpoint({"d_model": 192, "num_heads": 6,
                                            "num_layers": 4, "global_slots": 16})
         self.assertFalse(legacy.use_pairwise_mass_bias)
+        self.assertFalse(legacy.use_complement_bias)
         self.assertEqual(legacy.mass_attention_landmarks, 0)
         old = XLPeakClassifier(legacy)
         self.assertEqual(sum(p.numel() for p in old.parameters()), 3161473)
@@ -167,10 +264,12 @@ class XLTest(unittest.TestCase):
         config = XLConfig(d_model=24, num_heads=3, num_layers=2, local_window=4,
                           full_attention_max_peaks=0, global_slots=2, context_input_dim=12,
                           mz_frequencies=4, dropout=0, pairwise_query_chunk_size=4,
-                          mass_attention_landmarks=3, gradient_checkpointing=True)
+                          mass_attention_landmarks=3, gradient_checkpointing=True,
+                          use_complement_bias=True)
         chunked = XLPeakClassifier(config).train()
         for block in chunked.blocks:
             torch.nn.init.normal_(block.local_attn.mass_bias.network[-1].weight, std=0.1)
+            torch.nn.init.normal_(block.local_attn.complement_bias.network[-1].weight, std=0.1)
         other = deepcopy(config)
         other.pairwise_query_chunk_size = 64
         other.gradient_checkpointing = False
@@ -178,6 +277,7 @@ class XLTest(unittest.TestCase):
         unchunked.load_state_dict(chunked.state_dict())
         batch = {"peak_features": torch.randn(2, 13, 6), "mz": torch.rand(2, 13) * 1000,
                  "delta_mz": torch.rand(2, 13) * 1000, "intensity_features": torch.rand(2, 13, 2),
+                 "complement_mz": torch.rand(2, 13) * 1000,
                  "context": torch.rand(2, 3, 12), "context_mask": torch.tensor([[False, True, True], [False, False, True]]),
                  "padding_mask": torch.tensor([[False] * 7 + [True] * 6, [False] * 13])}
         first, second = chunked(**batch), unchunked(**batch)
@@ -191,6 +291,7 @@ class XLTest(unittest.TestCase):
                 self.assertIsNotNone(b.grad, name)
                 torch.testing.assert_close(a.grad, b.grad, atol=1e-6, rtol=1e-4, msg=name)
         self.assertGreater(float(chunked.blocks[0].local_attn.mass_bias.network[0].weight.grad.abs().sum()), 0)
+        self.assertGreater(float(chunked.blocks[0].local_attn.complement_bias.network[0].weight.grad.abs().sum()), 0)
 
         # Query chunking also preserves full short-spectrum attention.
         attention = chunked.blocks[0].local_attn.eval()
@@ -199,25 +300,28 @@ class XLTest(unittest.TestCase):
         reference.chunk_size = 64
         with torch.no_grad():
             a = attention.forward_peaks(batch["peak_features"].new_zeros(2, 13, 24), batch["mz"],
-                                        batch["padding_mask"], batch["intensity_features"][..., 1], 0)
+                                        batch["padding_mask"], batch["intensity_features"][..., 1], 0,
+                                        batch["complement_mz"])
             b = reference.forward_peaks(batch["peak_features"].new_zeros(2, 13, 24), batch["mz"],
-                                        batch["padding_mask"], batch["intensity_features"][..., 1], 0)
+                                        batch["padding_mask"], batch["intensity_features"][..., 1], 0,
+                                        batch["complement_mz"])
             torch.testing.assert_close(a, b, atol=1e-6, rtol=1e-5)
 
     def test_padding_masks_and_learning(self):
         torch.manual_seed(123)
         config = XLConfig(d_model=24, num_heads=3, num_layers=2, local_window=4,
                           global_slots=2, mz_frequencies=4, context_input_dim=12, dropout=0,
-                          full_attention_max_peaks=0)
+                          full_attention_max_peaks=0, use_complement_bias=True)
         model = XLPeakClassifier(config)
         batch = {"peak_features": torch.randn(2, 9, 6), "mz": torch.rand(2, 9) * 1000,
                  "delta_mz": torch.rand(2, 9) * 1000, "intensity_features": torch.rand(2, 9, 2),
+                 "complement_mz": torch.rand(2, 9) * 1000,
                  "context": torch.rand(2, 3, 12), "context_mask": torch.tensor([[False, True, True], [False, False, True]]),
                  "padding_mask": torch.tensor([[False] * 5 + [True] * 4, [False] * 9])}
         model.eval()
         original = model(**batch)
         changed = {k: v.clone() for k, v in batch.items()}
-        for key in ("peak_features", "mz", "delta_mz", "intensity_features"):
+        for key in ("peak_features", "mz", "delta_mz", "intensity_features", "complement_mz"):
             changed[key][0, 5:] = 10000
         changed["context"][changed["context_mask"]] = 10000
         torch.testing.assert_close(model(**changed)[0, :5], original[0, :5], atol=1e-6, rtol=1e-6)
@@ -314,13 +418,15 @@ class XLTest(unittest.TestCase):
             raw = dataset.raw_row(int(first))
             peaks = np.column_stack([raw["mz_arr"], raw["int_arr"]])
             sample, _, _ = build_sample(peaks, params, features, normalizer, deque(maxlen=3), None)
-            for key in ("peak_features", "mz", "delta_mz", "intensity_features", "context", "context_mask"):
+            for key in ("peak_features", "mz", "delta_mz", "complement_mz", "intensity_features", "context", "context_mask"):
                 np.testing.assert_allclose(sample[key], dataset[int(first)][key], atol=1e-6)
             with (root / "example.mgf").open("w") as handle:
                 from src.inference.run_xl import write_spectrum
                 write_spectrum(handle, params, peaks[::-1])
             inference = {"input": {"mgf_paths": ["example.mgf"]},
                          "model": {"checkpoint_path": "model/best_model.pt"},
+                         # CPU fp32, like the reference below; CUDA autocast differs by ~1e-3.
+                         "runtime": {"device": "cpu", "cpu_num_threads": 1},
                          "output": {"output_dir": "inference", "write_peak_scores": True}}
             result = run_inference(inference, root)
             self.assertEqual(result[0]["input_peaks"], len(peaks))
@@ -336,7 +442,7 @@ class XLTest(unittest.TestCase):
             # Original xl-v1 checkpoints lack the new mass-attention settings.
             legacy_values = dict(checkpoint["model_config"])
             for key in ("use_pairwise_mass_bias", "mass_attention_landmarks", "pairwise_mass_frequencies",
-                        "pairwise_mass_hidden_dim", "pairwise_query_chunk_size"):
+                        "pairwise_mass_hidden_dim", "pairwise_query_chunk_size", "use_complement_bias"):
                 legacy_values.pop(key)
             legacy_model = XLPeakClassifier(XLConfig.from_checkpoint(legacy_values)).eval()
             legacy_checkpoint = {**checkpoint, "format": "xl-v1", "model_config": legacy_values,
@@ -355,7 +461,11 @@ class XLTest(unittest.TestCase):
             config["training"]["resume_from_checkpoint"] = "model/last_checkpoint.pt"
             train(config, root)
             # Changing only targets cannot change input features or normalization.
-            self.assertEqual(len(checkpoint["normalizer"]["peak_mean"]), 6)
+            self.assertEqual(len(checkpoint["normalizer"]["peak_mean"]), 8)
+            self.assertEqual(checkpoint["model_config"]["peak_input_dim"], 7)
+            self.assertEqual(tuple(checkpoint["peak_feature_names"]), PEAK_FEATURES_V2)
+            last = torch.load(root / "model/last_checkpoint.pt", weights_only=False)
+            self.assertGreater(last["ema_updates"], 0)
             self.assertEqual(asdict(features)["previous_spectra"], 2)
             ablation = deepcopy(config)
             ablation["features"]["previous_spectra"] = 0

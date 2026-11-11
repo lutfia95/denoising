@@ -31,9 +31,16 @@ features:
   normalization_clip: 10.0
   previous_spectra: 2 # two earlier AVAILABLE spectra in this run, not adjacent scans
   max_scan_gap: null # set a justified gap or use previous_spectra: 0 as an ablation
+  # v2: log intensity (intensity path only), m/z over precursor, signed-log
+  # precursor delta, log1p previous/next gaps, intensity rank, intensity over
+  # the local maximum within +-local_intensity_window Da, and log distance to
+  # the nearest b/y complement partner. v1 = the original six features.
+  peak_feature_set: v2
+  local_intensity_window: 50.0
 
 model:
-  # Default: 8,232,481 parameters with current + two previous context tokens.
+  # Default: 8,235,329 parameters with v2 features, complement bias and
+  # current + two previous context tokens.
   d_model: 256
   num_heads: 8
   num_layers: 6
@@ -51,6 +58,7 @@ model:
   pairwise_mass_hidden_dim: 16
   pairwise_query_chunk_size: 256 # bounds pairwise-bias workspace; smaller uses less RAM
   mass_attention_landmarks: 32 # observed strong peaks add sparse distant connections
+  use_complement_bias: true # learn attention biases from b/y complement sums (mz_i + mz_j = M + 2H)
 
   # Previous 3.16M architecture (3,161,473 parameters), reference only.
   # To select it, replace the corresponding active settings above:
@@ -85,6 +93,9 @@ training:
   patience: 10
   min_delta: 0.0001
   log_every_batches: 100
+  ema_decay: 0.999 # evaluate and save averaged weights; null disables
+  augment_ppm_std: 5.0 # global m/z calibration shift per training spectrum; 0 disables
+  augment_intensity_log_std: 0.1 # per-peak multiplicative intensity jitter; 0 disables
   resume_from_checkpoint: null # project-relative path to outputs/xl/last_checkpoint.pt
 
 evaluation:

@@ -20,7 +20,84 @@ PEAK_FEATURES = (
     "log_intensity", "relative_intensity", "mz_over_precursor",
     "delta_to_precursor", "delta_prev", "delta_next",
 )
+# v2 drops the two intensity duplicates of intensity_features and adds rank,
+# local relative intensity and b/y complement evidence. Column 0 (log
+# intensity) feeds only the intensity embedding, not the peak projection.
+PEAK_FEATURES_V2 = (
+    "log_intensity", "mz_over_precursor", "delta_to_precursor", "delta_prev", "delta_next",
+    "intensity_rank", "local_relative_intensity", "complement_distance",
+)
 SPECTRUM_FEATURES = ("Charge", "exp m/z", "log_num_peaks", "log_tic")
+PROTON_MASS = 1.007276466812
+COMPLEMENT_MAX_DISTANCE = 5.0  # Da; farther partners all count as "no complement"
+COMPLEMENT_SCALE = 0.01  # Da; resolution of the log-compressed complement distance
+
+
+def feature_names(config):
+    """All normalized peak columns, in make_features order."""
+    return PEAK_FEATURES_V2 if config.peak_feature_set == "v2" else PEAK_FEATURES
+
+
+def model_feature_names(config):
+    """Columns that enter the peak projection (peak_input_dim of the model)."""
+    names = feature_names(config)
+    return names[1:] if config.peak_feature_set == "v2" else names
+
+
+def complement_target(precursor_mz, charge):
+    """Singly charged b + y m/z sum: neutral precursor mass plus two protons."""
+    return (float(precursor_mz) - PROTON_MASS) * float(charge) + 2 * PROTON_MASS
+
+
+def window_max(values, mz, half_width):
+    """Maximum of values over mz +- half_width for sorted mz, via a sparse table."""
+    n = len(values)
+    lo = np.searchsorted(mz, mz - half_width, side="left")
+    hi = np.searchsorted(mz, mz + half_width, side="right") - 1
+    table = [values]
+    while (1 << len(table)) <= n:
+        prev, step = table[-1], 1 << (len(table) - 1)
+        table.append(np.maximum(prev[:-step], prev[step:]))
+    level = np.floor(np.log2(hi - lo + 1)).astype(int)
+    out = np.empty(n, dtype=np.float64)
+    for k in np.unique(level):
+        rows = level == k
+        out[rows] = np.maximum(table[k][lo[rows]], table[k][hi[rows] - (1 << k) + 1])
+    return out
+
+
+def complement_distance(mz, target):
+    """Distance from each peak to its nearest other peak at target - mz (sorted mz)."""
+    partner = target - mz
+    pos = np.searchsorted(mz, partner)
+    best = np.full(len(mz), np.inf)
+    index = np.arange(len(mz))
+    # Self-matches (mz near target/2) are excluded, so check two neighbours per side.
+    for offset in (-2, -1, 0, 1):
+        j = np.clip(pos + offset, 0, len(mz) - 1)
+        distance = np.where(j == index, np.inf, np.abs(mz[j] - partner))
+        best = np.minimum(best, distance)
+    return np.minimum(best, COMPLEMENT_MAX_DISTANCE)
+
+
+def augment_spectrum(mz, intensity, precursor_mz, rng, ppm_std=0.0, intensity_log_std=0.0):
+    """Global ppm calibration shift (order preserving) and per-peak intensity jitter."""
+    if ppm_std:
+        factor = 1.0 + rng.normal(0.0, ppm_std) * 1e-6
+        mz, precursor_mz = mz * factor, precursor_mz * factor
+    if intensity_log_std:
+        intensity = intensity * np.exp(rng.normal(0.0, intensity_log_std, len(intensity)))
+    return mz, intensity, precursor_mz
+
+
+def model_peak_arrays(peak, intensity, normalizer, config):
+    """Split normalized make_features output into model peak and intensity inputs."""
+    normalized = normalizer.peak(peak, config)
+    peak_features = normalized[:, 1:] if config.peak_feature_set == "v2" else normalized
+    intensity_features = np.column_stack([
+        normalized[:, 0], np.sqrt(intensity / max(float(np.max(intensity)), 1e-12)),
+    ]).astype(np.float32)
+    return np.ascontiguousarray(peak_features), intensity_features
 
 
 def arrow_rows(table):
@@ -51,6 +128,9 @@ class XLFeatureConfig:
     previous_spectra: int = 2
     # None means the previous available annotated spectra, regardless of scan gap.
     max_scan_gap: int | None = None
+    # v1 = the original six features (default, so older checkpoints load as-is).
+    peak_feature_set: str = "v1"
+    local_intensity_window: float = 50.0  # Da half width for local_relative_intensity
 
     def __post_init__(self):
         if self.histogram_bins < 1 or self.histogram_max_mz <= 0:
@@ -59,6 +139,10 @@ class XLFeatureConfig:
             raise ValueError("previous_spectra must be 0, 1 or 2")
         if self.normalization_clip <= 0 or (self.max_scan_gap is not None and self.max_scan_gap < 1):
             raise ValueError("Invalid normalization_clip or max_scan_gap")
+        if self.peak_feature_set not in ("v1", "v2"):
+            raise ValueError("peak_feature_set must be v1 or v2")
+        if self.local_intensity_window <= 0:
+            raise ValueError("local_intensity_window must be positive")
 
 
 def read_config(path):
@@ -120,11 +204,23 @@ def make_features(mz, intensity, charge, precursor_mz, config):
     gaps = np.diff(mz)
     # Gap distributions are heavy-tailed. Signed log compresses precursor delta.
     delta = precursor_mz - mz
-    peak = np.column_stack([
-        np.log1p(intensity), relative, mz / precursor_mz,
-        np.sign(delta) * np.log1p(np.abs(delta)),
-        np.log1p(np.r_[0.0, gaps]), np.log1p(np.r_[gaps, 0.0]),
-    ]).astype(np.float32)
+    signed_delta = np.sign(delta) * np.log1p(np.abs(delta))
+    if config.peak_feature_set == "v2":
+        # Average ranks keep tied intensities identical; a single peak ranks 1.
+        from scipy.stats import rankdata
+        rank = (rankdata(intensity) - 1) / max(len(mz) - 1, 1) if len(mz) > 1 else np.ones(1)
+        local = intensity / np.maximum(window_max(intensity, mz, config.local_intensity_window), 1e-12)
+        complement = complement_distance(mz, complement_target(precursor_mz, charge))
+        peak = np.column_stack([
+            np.log1p(intensity), mz / precursor_mz, signed_delta,
+            np.log1p(np.r_[0.0, gaps]), np.log1p(np.r_[gaps, 0.0]),
+            rank, local, np.log1p(complement / COMPLEMENT_SCALE),
+        ]).astype(np.float32)
+    else:
+        peak = np.column_stack([
+            np.log1p(intensity), relative, mz / precursor_mz, signed_delta,
+            np.log1p(np.r_[0.0, gaps]), np.log1p(np.r_[gaps, 0.0]),
+        ]).astype(np.float32)
     spectrum = np.array([charge, precursor_mz, np.log1p(len(mz)),
                          np.log1p(intensity.sum())], dtype=np.float32)
     # Hellinger-style histogram: scale invariant; overflow remains in the last bin.
@@ -156,7 +252,7 @@ class XLNormalizer:
     def fit(cls, dataset):
         # Equal source mass, then equal spectrum mass within each source.
         # Float64 moments avoid the catastrophic cancellation of raw-intensity stats.
-        total = np.zeros(6, dtype=np.float64)
+        total = np.zeros(len(feature_names(dataset.features)), dtype=np.float64)
         total2 = total.copy()
         weights = dataset.source_weights
         for i in range(len(dataset)):
@@ -196,7 +292,8 @@ def previous_indices(frame, config):
 
 class XLSpectrumDataset(Dataset):
     def __init__(self, manifest, features, normalizer=None, training=False,
-                 max_train_peaks=None, seed=42, cache_row_groups=2):
+                 max_train_peaks=None, seed=42, cache_row_groups=2,
+                 augment_ppm_std=0.0, augment_intensity_log_std=0.0):
         manifest = Path(manifest).resolve()
         self.frame = pd.read_parquet(manifest).reset_index(drop=True)
         if self.frame.empty:
@@ -206,6 +303,10 @@ class XLSpectrumDataset(Dataset):
         self.normalizer = normalizer
         self.training = training
         self.max_train_peaks = max_train_peaks
+        if augment_ppm_std < 0 or augment_intensity_log_std < 0:
+            raise ValueError("Augmentation standard deviations must be nonnegative")
+        self.augment_ppm_std = float(augment_ppm_std)
+        self.augment_intensity_log_std = float(augment_intensity_log_std)
         self.seed = seed
         self.epoch = 0
         self.cache_row_groups = cache_row_groups
@@ -244,14 +345,22 @@ class XLSpectrumDataset(Dataset):
         row = self.raw_row(index)
         mz = np.asarray(row["mz_arr"], dtype=np.float64)
         intensity = np.asarray(row["int_arr"], dtype=np.float64)
-        peak, _, _ = make_features(mz, intensity, row["Charge"], row["exp m/z"], self.features)
+        precursor, charge = float(row["exp m/z"]), row["Charge"]
+        if self.training and (self.augment_ppm_std or self.augment_intensity_log_std):
+            # Labels stay attached: a few-ppm shift does not change an annotation.
+            rng = np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch, index, 1]))
+            mz, intensity, precursor = augment_spectrum(mz, intensity, precursor, rng,
+                                                        self.augment_ppm_std, self.augment_intensity_log_std)
+        peak, _, _ = make_features(mz, intensity, charge, precursor, self.features)
+        peak_features, intensity_features = model_peak_arrays(peak, intensity, self.normalizer, self.features)
         target = np.asarray(row["annotation_mask"], dtype=np.float32)
         # Uniform sampling during training only. Features and summaries describe
         # the full spectrum; validation and inference score every original peak.
         if self.training and self.max_train_peaks and len(mz) > self.max_train_peaks:
             rng = np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch, index]))
             keep = np.sort(rng.choice(len(mz), self.max_train_peaks, replace=False))
-            mz, intensity, peak, target = mz[keep], intensity[keep], peak[keep], target[keep]
+            mz, peak_features, intensity_features, target = (
+                mz[keep], peak_features[keep], intensity_features[keep], target[keep])
         indices = [index, *self.previous[index].tolist()]
         context = np.zeros((len(indices), 4 + self.features.histogram_bins), dtype=np.float32)
         mask = np.ones(len(indices), dtype=bool)
@@ -260,13 +369,11 @@ class XLSpectrumDataset(Dataset):
                 context[k] = np.r_[self.normalizer.spectrum(self._spectrum[j], self.features), self._histogram[j]]
                 mask[k] = False
         return {
-            "peak_features": self.normalizer.peak(peak, self.features),
+            "peak_features": peak_features,
             "mz": mz.astype(np.float32),
-            "intensity_features": np.column_stack([
-                self.normalizer.peak(peak, self.features)[:, 0],
-                np.sqrt(intensity / max(float(np.max(row["int_arr"])), 1e-12)),
-            ]).astype(np.float32),
-            "delta_mz": (float(row["exp m/z"]) - mz).astype(np.float32),
+            "intensity_features": intensity_features,
+            "delta_mz": (precursor - mz).astype(np.float32),
+            "complement_mz": (complement_target(precursor, charge) - mz).astype(np.float32),
             "context": context, "context_mask": mask, "targets": target,
             "weight": float(self.frame.iloc[index].weight),
             "source_weight": float(self.source_weights[index]),
@@ -277,7 +384,7 @@ class XLSpectrumDataset(Dataset):
 def xl_collate(samples):
     batch, length = len(samples), max(len(x["mz"]) for x in samples)
     output = {}
-    for key in ("peak_features", "mz", "delta_mz", "intensity_features", "targets"):
+    for key in ("peak_features", "mz", "delta_mz", "complement_mz", "intensity_features", "targets"):
         shape = (batch, length, *samples[0][key].shape[1:])
         values = np.zeros(shape, dtype=np.float32)
         for i, sample in enumerate(samples):

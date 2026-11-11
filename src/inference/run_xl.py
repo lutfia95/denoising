@@ -10,8 +10,9 @@ import numpy as np
 import torch
 
 from src.model.xl import XLConfig, XLPeakClassifier, amp_context, model_inputs
-from src.xl_data import (XLFeatureConfig, XLNormalizer, make_features, prepare_arrays,
-                         read_config, resolve_path, write_json, xl_collate)
+from src.xl_data import (XLFeatureConfig, XLNormalizer, complement_target, make_features,
+                         model_peak_arrays, prepare_arrays, read_config, resolve_path,
+                         write_json, xl_collate)
 
 
 def iter_mgf(path):
@@ -66,10 +67,11 @@ def build_sample(peaks, params, features, normalizer, history, last_scan):
                      (features.max_scan_gap is None or scan - s <= features.max_scan_gap)]
     for i, (_, summary) in enumerate(valid_history[-features.previous_spectra:][::-1] if features.previous_spectra else [], 1):
         context[i], mask[i] = summary, False
-    normalized = normalizer.peak(peak, features)
-    sample = {"peak_features": normalized, "mz": mz.astype(np.float32),
+    peak_features, intensity_features = model_peak_arrays(peak, intensity, normalizer, features)
+    sample = {"peak_features": peak_features, "mz": mz.astype(np.float32),
               "delta_mz": (precursor - mz).astype(np.float32),
-              "intensity_features": np.column_stack([normalized[:, 0], np.sqrt(intensity / max(float(intensity.max()), 1e-12))]).astype(np.float32),
+              "complement_mz": (complement_target(precursor, charge) - mz).astype(np.float32),
+              "intensity_features": intensity_features,
               "context": context, "context_mask": mask, "targets": np.zeros(len(mz), dtype=np.float32),
               "weight": 1.0, "source_weight": 1.0, "index": 0}
     # Match training: one representative per scan (the first charge variant).

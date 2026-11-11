@@ -36,6 +36,9 @@ class XLConfig:
     pairwise_mass_hidden_dim: int = 16
     pairwise_query_chunk_size: int = 256
     mass_attention_landmarks: int = 32
+    # b/y complements satisfy mz_i + mz_j = M + 2H, a sum the difference bias
+    # cannot express. This bias sees (M + 2H - mz_i) - mz_j instead.
+    use_complement_bias: bool = False
 
     @classmethod
     def from_checkpoint(cls, values):
@@ -43,6 +46,7 @@ class XLConfig:
         values = dict(values)
         values.setdefault("use_pairwise_mass_bias", False)
         values.setdefault("mass_attention_landmarks", 0)
+        values.setdefault("use_complement_bias", False)
         return cls(**values)
 
 
@@ -129,6 +133,12 @@ class MassAwarePeakAttention(Attention):
         self.landmarks = config.mass_attention_landmarks
         self.checkpoint_attention = config.gradient_checkpointing
         self.mass_bias = PairwiseMassBias(config) if config.use_pairwise_mass_bias else None
+        # Same physics encoder, applied to query complement position vs key m/z.
+        self.complement_bias = PairwiseMassBias(config) if config.use_complement_bias else None
+
+    @property
+    def has_bias(self):
+        return self.mass_bias is not None or self.complement_bias is not None
 
     def _project(self, tokens):
         b, n, _ = tokens.shape
@@ -136,14 +146,18 @@ class MassAwarePeakAttention(Attention):
         k, v = self.kv(tokens).view(b, n, 2, self.heads, self.dim).unbind(2)
         return q, k.transpose(1, 2), v.transpose(1, 2)
 
-    def _attend(self, q, k, v, query_mz, key_mz, key_padding):
+    def _attend(self, q, k, v, query_mz, key_mz, key_padding, query_complement=None):
         key_padding = key_padding.clone()
         key_padding[key_padding.all(-1), 0] = False
-        if self.mass_bias is None:
+        if not self.has_bias:
             mask = ~key_padding[:, None, None, :]
         else:
-            mask = self.mass_bias(query_mz, key_mz).to(q.dtype)
-            mask = mask.masked_fill(key_padding[:, None, None, :], float("-inf"))
+            bias = 0
+            if self.mass_bias is not None:
+                bias = self.mass_bias(query_mz, key_mz)
+            if self.complement_bias is not None:
+                bias = bias + self.complement_bias(query_complement, key_mz)
+            mask = bias.to(q.dtype).masked_fill(key_padding[:, None, None, :], float("-inf"))
         return F.scaled_dot_product_attention(
             q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0,
         )
@@ -154,24 +168,27 @@ class MassAwarePeakAttention(Attention):
             return checkpoint(self._attend, *inputs, use_reentrant=False)
         return self._attend(*inputs)
 
-    def _full(self, peaks, mz, padding):
-        if self.mass_bias is None:
+    def _full(self, peaks, mz, padding, complement=None):
+        if not self.has_bias:
             return super().forward(peaks, peaks, padding)
         q, k, v = self._project(peaks)
         pieces = []
-        for q_chunk, mz_chunk in zip(q.split(self.chunk_size, dim=2), mz.split(self.chunk_size, dim=1)):
-            pieces.append(self._run_attention(q_chunk, k, v, mz_chunk, mz, padding))
+        complement_chunks = (complement.split(self.chunk_size, dim=1) if complement is not None
+                             else [None] * len(mz.split(self.chunk_size, dim=1)))
+        for q_chunk, mz_chunk, c_chunk in zip(q.split(self.chunk_size, dim=2), mz.split(self.chunk_size, dim=1),
+                                              complement_chunks):
+            pieces.append(self._run_attention(q_chunk, k, v, mz_chunk, mz, padding, c_chunk))
         value = torch.cat(pieces, dim=2).transpose(1, 2).reshape_as(peaks)
         return self.out(value)
 
-    def _windows(self, peaks, mz, padding, intensity, shift):
+    def _windows(self, peaks, mz, padding, intensity, shift, complement=None):
         b, n, d = peaks.shape
         right = (-n - shift) % self.window
         tokens = F.pad(peaks, (0, 0, shift, right))
         padded_length = tokens.shape[1]
         windows = padded_length // self.window
         window_padding = F.pad(padding, (shift, right), value=True).reshape(b * windows, self.window)
-        if self.mass_bias is None and not self.landmarks:
+        if not self.has_bias and not self.landmarks:
             # Preserve the original XL attention path for old checkpoints.
             safe_padding = window_padding.clone()
             safe_padding[safe_padding.all(-1), 0] = False
@@ -187,6 +204,8 @@ class MassAwarePeakAttention(Attention):
 
         q, k, v = map(window_view, (q, k, v))
         window_mz = F.pad(mz, (shift, right)).reshape(b * windows, self.window)
+        window_complement = (F.pad(complement, (shift, right)).reshape(b * windows, self.window)
+                             if complement is not None else None)
         count = min(self.landmarks, n)
         # Stable ties preserve predictions when padding or batch lengths change.
         anchor_indices = intensity.masked_fill(padding, float("-inf")).argsort(descending=True, stable=True)[:, :count]
@@ -196,9 +215,11 @@ class MassAwarePeakAttention(Attention):
         anchor_padding = padding.gather(1, anchor_indices)
         per_chunk = max(1, self.chunk_size // self.window)
         pieces, offset = [], 0
-        for qc, kc, vc, mc, pc in zip(
+        complement_chunks = (window_complement.split(per_chunk) if window_complement is not None
+                             else [None] * len(window_mz.split(per_chunk)))
+        for qc, kc, vc, mc, pc, cc in zip(
             q.split(per_chunk), k.split(per_chunk), v.split(per_chunk),
-            window_mz.split(per_chunk), window_padding.split(per_chunk),
+            window_mz.split(per_chunk), window_padding.split(per_chunk), complement_chunks,
         ):
             window_ids = torch.arange(offset, offset + len(qc), device=peaks.device)
             owners = window_ids // windows
@@ -210,22 +231,27 @@ class MassAwarePeakAttention(Attention):
             values = torch.cat([vc, anchor_v[owners]], dim=2)
             key_mz = torch.cat([mc, anchor_mz[owners]], dim=1)
             key_padding = torch.cat([pc, anchor_padding[owners] | duplicate], dim=1)
-            pieces.append(self._run_attention(qc, keys, values, mc, key_mz, key_padding))
+            pieces.append(self._run_attention(qc, keys, values, mc, key_mz, key_padding, cc))
             offset += len(qc)
         value = torch.cat(pieces, dim=0).reshape(b, windows, self.heads, self.window, self.dim)
         value = value.permute(0, 1, 3, 2, 4).reshape(b, padded_length, d)
         return self.out(value[:, shift:shift + n])
 
-    def forward_peaks(self, peaks, mz, padding, intensity, shift):
+    def forward_peaks(self, peaks, mz, padding, intensity, shift, complement=None):
+        if self.complement_bias is not None and complement is None:
+            raise ValueError("This model needs complement_mz inputs")
+        if self.complement_bias is None:
+            complement = None
         if peaks.shape[1] <= self.full_limit:
-            return self._full(peaks, mz, padding)
-        update = self._windows(peaks, mz, padding, intensity, shift)
+            return self._full(peaks, mz, padding, complement)
+        update = self._windows(peaks, mz, padding, intensity, shift, complement)
         if self.full_limit:
             lengths = (~padding).sum(1)
             short = torch.nonzero(lengths <= self.full_limit).flatten()
             if short.numel():
                 length = int(lengths[short].max())
-                full_update = self._full(peaks[short, :length], mz[short, :length], padding[short, :length])
+                full_update = self._full(peaks[short, :length], mz[short, :length], padding[short, :length],
+                                         complement[short, :length] if complement is not None else None)
                 update = update.clone()
                 update[short, :length] = full_update
         return update
@@ -249,13 +275,13 @@ class XLBlock(nn.Module):
             nn.Linear(config.d_model * config.ff_multiplier, config.d_model),
         )
 
-    def forward(self, peaks, global_tokens, padding, global_padding, mz, intensity):
+    def forward(self, peaks, global_tokens, padding, global_padding, mz, intensity, complement=None):
         p, g = self.norm_peak(peaks), self.norm_global(global_tokens)
         memory = torch.cat([g, p], 1)
         mask = torch.cat([global_padding, padding], 1)
         global_tokens = global_tokens + self.drop(self.global_attn(g, memory, mask))
         peaks = peaks + self.drop(self.peak_global_attn(p, self.norm_global(global_tokens), global_padding))
-        local = self.local_attn.forward_peaks(self.norm_local(peaks), mz, padding, intensity, self.shift)
+        local = self.local_attn.forward_peaks(self.norm_local(peaks), mz, padding, intensity, self.shift, complement)
         peaks = peaks + self.drop(local)
         peaks = peaks + self.drop(self.ff(self.norm_ff(peaks)))
         return peaks.masked_fill(padding[..., None], 0), global_tokens
@@ -294,7 +320,7 @@ class XLPeakClassifier(nn.Module):
                                   nn.Dropout(config.dropout), nn.Linear(config.d_model, 1))
 
     def forward(self, peak_features, mz, delta_mz, intensity_features,
-                context, context_mask, padding_mask):
+                context, context_mask, padding_mask, complement_mz=None):
         if context.shape[1] > self.config.max_context_tokens:
             raise ValueError("Too many context spectra for this checkpoint")
         peaks = self.input_norm(self.peak_projection(peak_features)
@@ -309,20 +335,22 @@ class XLPeakClassifier(nn.Module):
             if self.training and self.config.gradient_checkpointing:
                 from torch.utils.checkpoint import checkpoint
                 peaks, global_tokens = checkpoint(block, peaks, global_tokens, padding_mask,
-                                                   global_padding, mz, intensity_features[..., 1], use_reentrant=False)
+                                                   global_padding, mz, intensity_features[..., 1], complement_mz,
+                                                   use_reentrant=False)
             else:
                 peaks, global_tokens = block(peaks, global_tokens, padding_mask, global_padding,
-                                             mz, intensity_features[..., 1])
+                                             mz, intensity_features[..., 1], complement_mz)
         summary = global_tokens[:, :1].expand(-1, peaks.shape[1], -1)
         logits = self.head(torch.cat([self.output_norm(peaks), summary], -1)).squeeze(-1)
         return logits.masked_fill(padding_mask, 0)
 
 
-MODEL_INPUTS = ("peak_features", "mz", "delta_mz", "intensity_features", "context", "context_mask", "padding_mask")
+MODEL_INPUTS = ("peak_features", "mz", "delta_mz", "intensity_features", "context", "context_mask",
+                "padding_mask", "complement_mz")
 
 
 def model_inputs(batch, device):
-    return {key: batch[key].to(device, non_blocking=True) for key in MODEL_INPUTS}
+    return {key: batch[key].to(device, non_blocking=True) for key in MODEL_INPUTS if key in batch}
 
 
 def amp_context(device, training_config):

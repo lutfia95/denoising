@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from dataclasses import asdict
 import hashlib
 import json
@@ -17,9 +18,9 @@ from torch.utils.data import DataLoader
 
 from src.model.xl import XLConfig, XLPeakClassifier, amp_context, model_inputs
 from src.training.logging_utils import tee_output
-from src.xl_data import (PEAK_FEATURES, SPECTRUM_FEATURES, XLBatchSampler, XLFeatureConfig,
-                         XLNormalizer, XLSpectrumDataset, read_config, resolve_path,
-                         write_json, xl_collate)
+from src.xl_data import (SPECTRUM_FEATURES, XLBatchSampler, XLFeatureConfig,
+                         XLNormalizer, XLSpectrumDataset, feature_names, model_feature_names,
+                         read_config, resolve_path, write_json, xl_collate)
 
 
 def select_threshold(samples, objective="min_source_recall", target_recall=0.95):
@@ -138,6 +139,30 @@ def sample_weights(dataset, training):
     return weights / weights.mean()
 
 
+class WeightEMA:
+    """Exponential moving average of weights; evaluated and saved instead of raw weights.
+
+    The decay ramps up as (1 + n) / (10 + n) so early averages are not dominated
+    by the random initialization.
+    """
+    def __init__(self, model, decay):
+        if not 0 < decay < 1:
+            raise ValueError("ema_decay must be in (0, 1), or null to disable")
+        self.decay, self.updates = decay, 0
+        self.model = deepcopy(model).eval()
+        for parameter in self.model.parameters():
+            parameter.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model):
+        self.updates += 1
+        decay = min(self.decay, (1 + self.updates) / (10 + self.updates))
+        for average, current in zip(self.model.parameters(), model.parameters()):
+            average.lerp_(current.detach(), 1 - decay)
+        for average, current in zip(self.model.buffers(), model.buffers()):
+            average.copy_(current)
+
+
 def save_checkpoint(path, state):
     temp = path.with_suffix(".tmp")
     torch.save(state, temp)
@@ -168,7 +193,9 @@ def train(config, root):
         data_signature.update((split_dir / name).read_bytes())
     signature = data_signature.hexdigest()
     datasets = {name: XLSpectrumDataset(split_dir / f"{name}.parquet", features,
-                training=name == "train", max_train_peaks=settings.get("max_train_peaks", 8192), seed=seed)
+                training=name == "train", max_train_peaks=settings.get("max_train_peaks", 8192), seed=seed,
+                augment_ppm_std=settings.get("augment_ppm_std", 0.0) or 0.0,
+                augment_intensity_log_std=settings.get("augment_intensity_log_std", 0.0) or 0.0)
                 for name in ("train", "val", "test")}
     for name, dataset in datasets.items():
         groups = dataset.frame.groupby("source")[["num_peaks", "num_positive"]].sum()
@@ -201,7 +228,8 @@ def train(config, root):
     write_json(output / "normalizer.json", asdict(normalizer))
     model_config = (XLConfig.from_checkpoint(resume["model_config"]) if resume else
                     XLConfig(context_input_dim=4 + features.histogram_bins,
-                             max_context_tokens=1 + features.previous_spectra, **config.get("model", {})))
+                             max_context_tokens=1 + features.previous_spectra,
+                             peak_input_dim=len(model_feature_names(features)), **config.get("model", {})))
     cap = settings.get("max_train_peaks", 8192)
     if cap is not None and (not isinstance(cap, int) or cap < 1):
         raise ValueError("max_train_peaks must be a positive integer or null")
@@ -214,7 +242,9 @@ def train(config, root):
           f"heads={model_config.num_heads}, global_slots={model_config.global_slots}, "
           f"mass_bias={model_config.use_pairwise_mass_bias}, "
           f"peak_landmarks={model_config.mass_attention_landmarks}, "
-          f"pairwise_chunk={model_config.pairwise_query_chunk_size}", flush=True)
+          f"pairwise_chunk={model_config.pairwise_query_chunk_size}, "
+          f"complement_bias={model_config.use_complement_bias}, "
+          f"peak_features={features.peak_feature_set} ({model_config.peak_input_dim})", flush=True)
     samplers, loaders = {}, {}
     workers = int(settings.get("num_workers", 0))
     for name, dataset in datasets.items():
@@ -246,10 +276,12 @@ def train(config, root):
         return 0.05 + 0.95 * (1 + math.cos(math.pi * progress)) / 2
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_scale)
+    ema_decay = settings.get("ema_decay")
+    ema = WeightEMA(model, float(ema_decay)) if ema_decay else None
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and settings.get("enable_amp", True) and not torch.cuda.is_bf16_supported())
     history, best_score, bad_epochs, first_epoch = [], -1.0, 0, 1
     common = {"format": "xl-v2", "config": config, "model_config": asdict(model_config),
-              "feature_config": asdict(features), "peak_feature_names": PEAK_FEATURES,
+              "feature_config": asdict(features), "peak_feature_names": feature_names(features),
               "spectrum_feature_names": SPECTRUM_FEATURES, "normalizer": asdict(normalizer),
               "data_signature": signature, "pos_weight": float(pos_weight) if pos_weight is not None else None}
     if resume:
@@ -260,6 +292,11 @@ def train(config, root):
         history, best_score, bad_epochs = resume["history"], resume["best_score"], resume["bad_epochs"]
         first_epoch = resume["epoch"] + 1
         torch.set_rng_state(resume["torch_rng_state"])
+        if ema is not None:
+            if "ema_state_dict" not in resume:
+                raise ValueError("Resume checkpoint has no EMA weights but ema_decay is set")
+            ema.model.load_state_dict(resume["ema_state_dict"])
+            ema.updates = resume["ema_updates"]
         if device.type == "cuda" and resume.get("cuda_rng_states") is not None:
             torch.cuda.set_rng_state_all(resume["cuda_rng_states"])
     elif config["evaluation"].get("intensity_baseline", True):
@@ -298,18 +335,21 @@ def train(config, root):
                 scaler.update()
                 if scaler.get_scale() >= old_scale:
                     scheduler.step()
+                    if ema is not None:
+                        ema.update(model)
                 optimizer.zero_grad(set_to_none=True)
                 pending = 0
             if step == 1 or step % settings.get("log_every_batches", 100) == 0:
                 print(f"Epoch {epoch} batch {step}/{number_batches}: loss={train_sum / train_count:.5f}", flush=True)
-        validation, _ = evaluate(model, loaders["val"], device, config)
+        selected = ema.model if ema is not None else model
+        validation, _ = evaluate(selected, loaders["val"], device, config)
         score = validation["source_macro_average_precision"]
         history.append({"epoch": epoch, "train_loss": train_sum / train_count,
                         "val_loss": validation["loss"], "val_source_macro_ap": score,
                         "learning_rate": optimizer.param_groups[0]["lr"]})
         if score > best_score + settings.get("min_delta", 0.0001):
             best_score, bad_epochs = score, 0
-            save_checkpoint(output / "best_model.pt", {**common, "model_state_dict": model.state_dict(),
+            save_checkpoint(output / "best_model.pt", {**common, "model_state_dict": selected.state_dict(),
                             "epoch": epoch, "best_score": best_score, "threshold": 0.5,
                             "threshold_tuned": False})
         else:
@@ -318,6 +358,7 @@ def train(config, root):
                         "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(),
                         "scaler_state_dict": scaler.state_dict(), "epoch": epoch, "history": history,
                         "best_score": best_score, "bad_epochs": bad_epochs,
+                        **({"ema_state_dict": ema.model.state_dict(), "ema_updates": ema.updates} if ema else {}),
                         "torch_rng_state": torch.get_rng_state(),
                         "cuda_rng_states": torch.cuda.get_rng_state_all() if device.type == "cuda" else None})
         pd.DataFrame(history).to_csv(output / "history.csv", index=False)
