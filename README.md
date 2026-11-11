@@ -1,8 +1,5 @@
 # denoising
 
-The XL pipeline trains on both supplied annotation sources without instrument or
-recalibration labels. See [the pipeline audit and optimization guide](docs/xl_pipeline.md).
-
 The default is the 8.23M model: six layers, width 256, eight heads, 32 global slots,
 and learned pairwise mass attention with 32 strong-peak landmarks. The previous
 3.16M architecture is commented in the training config for reference.
