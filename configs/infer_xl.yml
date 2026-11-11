@@ -1,0 +1,20 @@
+project_root: ..
+
+input:
+  # Each file is one acquisition run, in SCANS order, with PEPMASS and CHARGE.
+  mgf_paths:
+    - data/example.mgf
+
+model:
+  checkpoint_path: outputs/xl/best_model.pt
+
+evaluation:
+  threshold: null # null uses the validation-selected checkpoint threshold
+
+runtime:
+  device: auto
+  cpu_num_threads: 8
+
+output:
+  output_dir: outputs/xl_inference
+  write_peak_scores: false # optional per-peak CSV in original input order

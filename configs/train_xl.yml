@@ -1,0 +1,101 @@
+# All paths are relative to project_root, independent of the working directory.
+project_root: ..
+
+data:
+  sources:
+    - name: legacy_5pct
+      path: data/labeled_new_29962926_5pct.parquet
+      schema: legacy
+      priority: 0
+    - name: annotations_1pct
+      path: data/annotations_1pct/combined_annotations_1pct.parquet
+      schema: annotations
+      priority: 1 # tie breaker only after FDR, never a model input
+  split_dir: data/splits_xl
+
+split:
+  seed: 42
+  fractions: [0.70, 0.15, 0.15]
+  group_by: project # stronger holdout than separate files from the same project
+  row_group_size: 128
+  conflicting_labels: best_fdr # use exclude for a stricter annotation audit
+  minimum_weight: 0.5 # actual weight = max(minimum_weight, 1 - max(fdr, 0))
+
+features:
+  # Fixed six-feature contract: log1p intensity, relative intensity, m/z over
+  # precursor, signed-log precursor delta, log1p previous/next peak gaps.
+  # Spectrum features: charge, precursor m/z, log1p peak count, log1p TIC.
+  # No instrument, recali, source, project, peptide or annotation input.
+  histogram_bins: 64
+  histogram_max_mz: 4000.0
+  normalization_clip: 10.0
+  previous_spectra: 2 # two earlier AVAILABLE spectra in this run, not adjacent scans
+  max_scan_gap: null # set a justified gap or use previous_spectra: 0 as an ablation
+
+model:
+  # Default: 8,232,481 parameters with current + two previous context tokens.
+  d_model: 256
+  num_heads: 8
+  num_layers: 6
+  ff_multiplier: 4
+  dropout: 0.1
+  local_window: 64
+  full_attention_max_peaks: 1024 # unrestricted peak attention for short spectra
+  global_slots: 32
+  mz_frequencies: 32
+  mz_min_wavelength: 0.05
+  mz_max_wavelength: 10000.0
+  gradient_checkpointing: true
+  use_pairwise_mass_bias: true # learn attention biases from peak-to-peak m/z gaps
+  pairwise_mass_frequencies: 8
+  pairwise_mass_hidden_dim: 16
+  pairwise_query_chunk_size: 256 # bounds pairwise-bias workspace; smaller uses less RAM
+  mass_attention_landmarks: 32 # observed strong peaks add sparse distant connections
+
+  # Previous 3.16M architecture (3,161,473 parameters), reference only.
+  # To select it, replace the corresponding active settings above:
+  # d_model: 192
+  # num_heads: 6
+  # num_layers: 4
+  # global_slots: 16
+  # use_pairwise_mass_bias: false
+  # mass_attention_landmarks: 0
+  # Shared settings remain: ff_multiplier=4, dropout=0.1, local_window=64,
+  # full_attention_max_peaks=1024, mz_frequencies=32, gradient_checkpointing=true.
+
+training:
+  seed: 42
+  device: auto
+  cpu_num_threads: 100
+  num_workers: 0 # increase to 2 after checking host memory and disk throughput
+  batch_size: 4
+  batch_peak_budget: 16384
+  gradient_accumulation_steps: 4
+  max_train_peaks: null # uniform subsample above this size; null disables sampling
+  max_epochs: 60
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  warmup_fraction: 0.05
+  gradient_clip_norm: 1.0
+  enable_amp: true
+  use_training_weights: true
+  balance_sources: true
+  use_pos_weight: false # first avoid stacking source, FDR and class corrections
+  max_pos_weight: 10.0
+  patience: 10
+  min_delta: 0.0001
+  log_every_batches: 100
+  resume_from_checkpoint: null # project-relative path to outputs/xl/last_checkpoint.pt
+
+evaluation:
+  # Model selection: unweighted AP per source, averaged equally across sources.
+  # Rank metrics and threshold fitting use a fixed, label-independent sample.
+  # Confusion counts and retention recalls always score every evaluation peak.
+  max_sampled_peaks_per_source: 2000000 # null for exact full-peak AP (more RAM)
+  threshold_objective: min_source_recall # alternatively f1
+  target_recall: 0.95 # validation-sample target; inspect full validation recall
+  retained_peak_fractions: [0.3, 0.5, 0.7]
+  intensity_baseline: true
+
+output:
+  output_dir: outputs/xl

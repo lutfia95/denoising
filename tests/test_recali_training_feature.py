@@ -16,10 +16,14 @@ class RecaliTrainingFeatureTest(unittest.TestCase):
     def test_config_increases_model_spectrum_input_width(self) -> None:
         self.assertTrue(self.config.features.use_recali_label)
         self.assertEqual(self.config.features.recali_label_source_column, "recali")
-        self.assertEqual(self.config.model.spectrum_input_dim, 8)
+        # Instrument labels are optional; recali contributes exactly one channel.
+        expected_width = len(self.config.features.spectrum_feature_columns) + 1
+        if self.config.features.use_instrument_label:
+            expected_width += len(self.config.features.instrument_names)
+        self.assertEqual(self.config.model.spectrum_input_dim, expected_width)
 
         model = PeakTransformerImpClassifier(self.config.model)
-        self.assertEqual(model.spectrum_projection.in_features, 8)
+        self.assertEqual(model.spectrum_projection.in_features, expected_width)
 
     def test_binary_recali_encoding(self) -> None:
         recali_true_vector = build_recali_label(

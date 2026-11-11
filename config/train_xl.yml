@@ -1,0 +1,3 @@
+# Compatibility entry point; edit the canonical configuration in configs/.
+# configs/train_xl.yml contains the active 8.23M model and commented 3.16M settings.
+extends: ../configs/train_xl.yml
