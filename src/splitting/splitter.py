@@ -122,33 +122,34 @@ class GroupedSpectrumSplitter:
         train: list[ProcessedSpectrum] = []
         val: list[ProcessedSpectrum] = []
         test: list[ProcessedSpectrum] = []
-
-        group_to_split_rows: list[dict[str, Any]] = []
-
-        for group_key in shuffled_groups:
-            if group_key in train_groups:
-                split_name = "train"
-            elif group_key in val_groups:
-                split_name = "val"
-            else:
-                split_name = "test"
-
-            group_to_split_rows.append(
-                {
-                    "split_method": self.config.split_method,
-                    "group_key": group_key,
-                    "split": split_name,
-                }
+        group_to_split = {
+            group_key: (
+                "train"
+                if group_key in train_groups
+                else "val"
+                if group_key in val_groups
+                else "test"
             )
+            for group_key in shuffled_groups
+        }
+
+        group_to_split_rows = [
+            {
+                "split_method": self.config.split_method,
+                "group_key": group_key,
+                "split": group_to_split[group_key],
+            }
+            for group_key in shuffled_groups
+        ]
 
         for ps in spectra:
             group_key = self._get_group_key(ps)
-
-            if group_key in train_groups:
+            split_name = group_to_split.get(group_key)
+            if split_name == "train":
                 train.append(ps)
-            elif group_key in val_groups:
+            elif split_name == "val":
                 val.append(ps)
-            elif group_key in test_groups:
+            elif split_name == "test":
                 test.append(ps)
             else:
                 raise RuntimeError(f"Group key {group_key!r} was not assigned to any split")
@@ -295,6 +296,22 @@ class GroupedSpectrumSplitter:
             output_path / "group_to_split.parquet",
             index=False,
         )
+
+    def write_training_ready_parquets(
+        self,
+        split_result: SplitResult,
+        output_dir: str | Path,
+    ) -> None:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        train_df = self._processed_spectra_to_training_df(split_result.train, split_name="train")
+        val_df = self._processed_spectra_to_training_df(split_result.val, split_name="val")
+        test_df = self._processed_spectra_to_training_df(split_result.test, split_name="test")
+
+        train_df.to_parquet(output_path / "train_training_ready.parquet", index=False)
+        val_df.to_parquet(output_path / "val_training_ready.parquet", index=False)
+        test_df.to_parquet(output_path / "test_training_ready.parquet", index=False)
 
     def _build_summary_df(
         self,
