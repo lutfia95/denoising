@@ -244,6 +244,8 @@ def train(config, root):
           f"peak_landmarks={model_config.mass_attention_landmarks}, "
           f"pairwise_chunk={model_config.pairwise_query_chunk_size}, "
           f"complement_bias={model_config.use_complement_bias}, "
+          f"complement_neighbors={model_config.complement_neighbors}, "
+          f"complement_tolerance_da={model_config.complement_tolerance_da}, "
           f"peak_features={features.peak_feature_set} ({model_config.peak_input_dim})", flush=True)
     samplers, loaders = {}, {}
     workers = int(settings.get("num_workers", 0))

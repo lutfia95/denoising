@@ -1,0 +1,21 @@
+# Install PyTorch first with the CUDA build for your GPU (see README), then:
+#   pip install -r requirements.txt
+# Versions are the minimums matching the tested environment (Python 3.12).
+
+# XL model: split, training, inference
+torch>=2.5
+numpy>=2.0
+pandas>=2.2
+pyarrow>=15.0
+scipy>=1.13
+scikit-learn>=1.5
+PyYAML>=6.0
+
+# Tests
+pytest>=8.0
+
+# Older MLP / transformer scripts and notebooks
+matplotlib>=3.8
+psutil>=5.9
+jupyterlab>=4.0
+# autogluon.tabular  # only for src/training/train_autogluon.py; large install

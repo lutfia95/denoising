@@ -351,7 +351,7 @@ class XLSpectrumDataset(Dataset):
             rng = np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch, index, 1]))
             mz, intensity, precursor = augment_spectrum(mz, intensity, precursor, rng,
                                                         self.augment_ppm_std, self.augment_intensity_log_std)
-        peak, _, _ = make_features(mz, intensity, charge, precursor, self.features)
+        peak, spectrum, histogram = make_features(mz, intensity, charge, precursor, self.features)
         peak_features, intensity_features = model_peak_arrays(peak, intensity, self.normalizer, self.features)
         target = np.asarray(row["annotation_mask"], dtype=np.float32)
         # Uniform sampling during training only. Features and summaries describe
@@ -366,7 +366,10 @@ class XLSpectrumDataset(Dataset):
         mask = np.ones(len(indices), dtype=bool)
         for k, j in enumerate(indices):
             if j >= 0:
-                context[k] = np.r_[self.normalizer.spectrum(self._spectrum[j], self.features), self._histogram[j]]
+                # Current summary and peaks must describe the same augmented,
+                # full spectrum (even when training subsequently samples peaks).
+                spec, hist = (spectrum, histogram) if k == 0 else (self._spectrum[j], self._histogram[j])
+                context[k] = np.r_[self.normalizer.spectrum(spec, self.features), hist]
                 mask[k] = False
         return {
             "peak_features": peak_features,

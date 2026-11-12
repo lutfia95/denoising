@@ -56,9 +56,11 @@ model:
   use_pairwise_mass_bias: true # learn attention biases from peak-to-peak m/z gaps
   pairwise_mass_frequencies: 8
   pairwise_mass_hidden_dim: 16
-  pairwise_query_chunk_size: 256 # bounds pairwise-bias workspace; smaller uses less RAM
+  pairwise_query_chunk_size: 4096 # bounds bias workspace; re-profile GPU memory with complement neighbors enabled
   mass_attention_landmarks: 32 # observed strong peaks add sparse distant connections
   use_complement_bias: true # learn attention biases from b/y complement sums (mz_i + mz_j = M + 2H)
+  complement_neighbors: 2 # nearest non-self partners per query, shared and deduplicated within each local window
+  complement_tolerance_da: 0.05 # candidate radius in Da; 0 neighbors disables these edges for ablations
 
   # Previous 3.16M architecture (3,161,473 parameters), reference only.
   # To select it, replace the corresponding active settings above:

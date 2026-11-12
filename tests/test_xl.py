@@ -55,7 +55,8 @@ def make_fixture(root):
             "split": {"group_by": "project", "fractions": [0.7, 0.15, 0.15], "seed": 42, "row_group_size": 8},
             "features": {"histogram_bins": 8, "previous_spectra": 2, "peak_feature_set": "v2"},
             "model": {"d_model": 24, "num_heads": 3, "num_layers": 2, "local_window": 4,
-                      "global_slots": 2, "mz_frequencies": 4, "dropout": 0.0, "use_complement_bias": True},
+                      "global_slots": 2, "mz_frequencies": 4, "dropout": 0.0, "use_complement_bias": True,
+                      "complement_neighbors": 2, "full_attention_max_peaks": 8},
             "training": {"seed": 42, "device": "cpu", "cpu_num_threads": 1, "max_epochs": 1,
                          "batch_size": 4, "gradient_accumulation_steps": 2, "learning_rate": 0.003,
                          "max_train_peaks": 12, "num_workers": 0, "ema_decay": 0.9,
@@ -159,6 +160,95 @@ class XLTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             attention.forward_peaks(tokens, mz, padding, mz, 0)
 
+    def test_augmented_current_summary_matches_peak_inputs(self):
+        with tempfile.TemporaryDirectory(prefix="xl-augmentation-") as folder:
+            root = Path(folder)
+            config = make_fixture(root)
+            split_data(config, root)
+            features = XLFeatureConfig(**config["features"])
+            dataset = XLSpectrumDataset(root / "splits/train.parquet", features, training=True,
+                                        max_train_peaks=12, augment_ppm_std=500, augment_intensity_log_std=0.5)
+            dataset.normalizer = XLNormalizer.fit(dataset)
+            dataset.epoch = 3
+            index = int(np.flatnonzero((dataset.previous >= 0).any(1))[0])
+            row = dataset.raw_row(index)
+            rng = np.random.default_rng(np.random.SeedSequence([dataset.seed, dataset.epoch, index, 1]))
+            mz, intensity, precursor = augment_spectrum(np.asarray(row["mz_arr"]), np.asarray(row["int_arr"]),
+                                                        row["exp m/z"], rng, 500, 0.5)
+            _, spectrum, histogram = make_features(mz, intensity, row["Charge"], precursor, features)
+            sample = dataset[index]
+            np.testing.assert_allclose(sample["context"][0],
+                                       np.r_[dataset.normalizer.spectrum(spectrum, features), histogram])
+            self.assertEqual(len(sample["mz"]), 12)
+            # Summary still represents all 17 peaks, and historical scans keep their own summaries.
+            self.assertAlmostEqual(float(spectrum[2]), np.log1p(17), places=6)
+            for k, j in enumerate(dataset.previous[index], 1):
+                if j >= 0:
+                    np.testing.assert_allclose(sample["context"][k], np.r_[
+                        dataset.normalizer.spectrum(dataset._spectrum[j], features), dataset._histogram[j]])
+            self.assertFalse(np.allclose(sample["context"][0, :4],
+                                        dataset.normalizer.spectrum(dataset._spectrum[index], features)))
+
+    def test_complement_neighbors_reach_weak_peaks_without_duplicate_votes(self):
+        config = XLConfig(d_model=4, num_heads=1, local_window=2, full_attention_max_peaks=0,
+                          mass_attention_landmarks=0, complement_neighbors=2, complement_tolerance_da=0.05,
+                          dropout=0, gradient_checkpointing=False, use_pairwise_mass_bias=False)
+        attention = MassAwarePeakAttention(config).eval()
+        with torch.no_grad():
+            attention.q.weight.zero_()
+            attention.q.bias.zero_()
+            attention.kv.weight.zero_()
+            attention.kv.bias.zero_()
+            attention.kv.weight[4:].copy_(torch.eye(4))
+            attention.out.weight.copy_(torch.eye(4))
+            attention.out.bias.zero_()
+        tokens = torch.zeros(1, 6, 4)
+        tokens[0, 5, 0] = 9
+        mz = torch.tensor([[100.0, 100.01, 500.0, 700.0, 800.0, 1000.0]])
+        padding = torch.zeros(1, 6, dtype=torch.bool)
+        intensity = torch.tensor([[10.0, 9, 8, 7, 6, 0.01]])
+        complement = 1100 - mz
+        result = attention.forward_peaks(tokens, mz, padding, intensity, 0, complement)
+        # Both local queries nominate the same weak remote key. Count it once.
+        self.assertAlmostEqual(float(result[0, 0, 0].detach()), 3, places=6)
+        reference = deepcopy(attention)
+        reference.complement_neighbors = 0
+        self.assertEqual(float(reference.forward_peaks(tokens, mz, padding, intensity, 0)[0, 0, 0].detach()), 0)
+        # Already-visible landmarks and local keys must not gain duplicate votes.
+        attention.landmarks = 1
+        strong_remote = intensity.clone()
+        strong_remote[0, 5] = 100
+        self.assertAlmostEqual(float(attention.forward_peaks(
+            tokens, mz, padding, strong_remote, 0, complement)[0, 0, 0].detach()), 3, places=6)
+        attention.landmarks = 0
+        local_complement = mz.flip(1)  # exercise arbitrary query targets against a brute-force nearest search
+        indices = attention._complement_indices(mz, padding, local_complement)
+        for i in range(6):
+            candidates = sorted((abs(float(mz[0, j] - local_complement[0, i])), j)
+                                for j in range(6) if j != i)
+            expected = [j for distance, j in candidates[:2] if distance <= 0.05]
+            self.assertEqual(indices[0, i][indices[0, i] >= 0].tolist(), expected)
+        for shift in (0, 1):
+            expected = attention.forward_peaks(tokens, mz, padding, intensity, shift, complement)
+            actual = attention.forward_peaks(
+                torch.nn.functional.pad(tokens, (0, 0, 0, 4), value=10000),
+                torch.nn.functional.pad(mz, (0, 4)),
+                torch.nn.functional.pad(padding, (0, 4), value=True),
+                torch.nn.functional.pad(intensity, (0, 4), value=10000), shift,
+                torch.nn.functional.pad(complement, (0, 4)))
+            torch.testing.assert_close(actual[:, :6], expected)
+        # No self-complement edge, even at exactly half the target mass.
+        self.assertTrue((attention._complement_indices(
+            torch.tensor([[550.0]]), torch.tensor([[False]]), torch.tensor([[550.0]])) == -1).all())
+        # When a complement is already local, the original two-key mean is unchanged.
+        local = attention.forward_peaks(tokens[:, -2:], mz[:, -2:], padding[:, -2:],
+                                        intensity[:, -2:], 0, 1800 - mz[:, -2:])
+        self.assertAlmostEqual(float(local[0, 0, 0].detach()), 4.5, places=6)
+        # Short spectra retain their full-attention behavior regardless of neighbor settings.
+        attention.full_limit = reference.full_limit = 8
+        torch.testing.assert_close(attention.forward_peaks(tokens, mz, padding, intensity, 0, complement),
+                                   reference.forward_peaks(tokens, mz, padding, intensity, 0))
+
     def test_weight_ema(self):
         model = torch.nn.Linear(2, 1)
         with torch.no_grad():
@@ -193,6 +283,7 @@ class XLTest(unittest.TestCase):
         self.assertEqual((model_config.d_model, model_config.num_heads, model_config.num_layers,
                           model_config.global_slots, model_config.peak_input_dim), (256, 8, 6, 32, 7))
         self.assertTrue(model_config.use_complement_bias)
+        self.assertEqual(model_config.complement_neighbors, 2)
         model = XLPeakClassifier(model_config)
         self.assertEqual(sum(p.numel() for p in model.parameters()), 8235329)
         legacy = XLConfig.from_checkpoint({"d_model": 192, "num_heads": 6,
@@ -200,6 +291,7 @@ class XLTest(unittest.TestCase):
         self.assertFalse(legacy.use_pairwise_mass_bias)
         self.assertFalse(legacy.use_complement_bias)
         self.assertEqual(legacy.mass_attention_landmarks, 0)
+        self.assertEqual(legacy.complement_neighbors, 0)
         old = XLPeakClassifier(legacy)
         self.assertEqual(sum(p.numel() for p in old.parameters()), 3161473)
         self.assertFalse(any("mass_bias" in name for name in old.state_dict()))
@@ -265,7 +357,7 @@ class XLTest(unittest.TestCase):
                           full_attention_max_peaks=0, global_slots=2, context_input_dim=12,
                           mz_frequencies=4, dropout=0, pairwise_query_chunk_size=4,
                           mass_attention_landmarks=3, gradient_checkpointing=True,
-                          use_complement_bias=True)
+                          use_complement_bias=True, complement_neighbors=2, complement_tolerance_da=1000)
         chunked = XLPeakClassifier(config).train()
         for block in chunked.blocks:
             torch.nn.init.normal_(block.local_attn.mass_bias.network[-1].weight, std=0.1)
@@ -280,6 +372,7 @@ class XLTest(unittest.TestCase):
                  "complement_mz": torch.rand(2, 13) * 1000,
                  "context": torch.rand(2, 3, 12), "context_mask": torch.tensor([[False, True, True], [False, False, True]]),
                  "padding_mask": torch.tensor([[False] * 7 + [True] * 6, [False] * 13])}
+        batch["mz"] = batch["mz"].sort(dim=1).values
         first, second = chunked(**batch), unchunked(**batch)
         torch.testing.assert_close(first, second, atol=1e-6, rtol=1e-5)
         target = torch.rand_like(first)
@@ -442,7 +535,8 @@ class XLTest(unittest.TestCase):
             # Original xl-v1 checkpoints lack the new mass-attention settings.
             legacy_values = dict(checkpoint["model_config"])
             for key in ("use_pairwise_mass_bias", "mass_attention_landmarks", "pairwise_mass_frequencies",
-                        "pairwise_mass_hidden_dim", "pairwise_query_chunk_size", "use_complement_bias"):
+                        "pairwise_mass_hidden_dim", "pairwise_query_chunk_size", "use_complement_bias",
+                        "complement_neighbors", "complement_tolerance_da"):
                 legacy_values.pop(key)
             legacy_model = XLPeakClassifier(XLConfig.from_checkpoint(legacy_values)).eval()
             legacy_checkpoint = {**checkpoint, "format": "xl-v1", "model_config": legacy_values,

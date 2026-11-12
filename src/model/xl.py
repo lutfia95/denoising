@@ -39,6 +39,8 @@ class XLConfig:
     # b/y complements satisfy mz_i + mz_j = M + 2H, a sum the difference bias
     # cannot express. This bias sees (M + 2H - mz_i) - mz_j instead.
     use_complement_bias: bool = False
+    complement_neighbors: int = 0
+    complement_tolerance_da: float = 0.05
 
     @classmethod
     def from_checkpoint(cls, values):
@@ -47,6 +49,7 @@ class XLConfig:
         values.setdefault("use_pairwise_mass_bias", False)
         values.setdefault("mass_attention_landmarks", 0)
         values.setdefault("use_complement_bias", False)
+        values.setdefault("complement_neighbors", 0)
         return cls(**values)
 
 
@@ -131,6 +134,8 @@ class MassAwarePeakAttention(Attention):
         self.full_limit = config.full_attention_max_peaks
         self.chunk_size = config.pairwise_query_chunk_size
         self.landmarks = config.mass_attention_landmarks
+        self.complement_neighbors = config.complement_neighbors
+        self.complement_tolerance_da = config.complement_tolerance_da
         self.checkpoint_attention = config.gradient_checkpointing
         self.mass_bias = PairwiseMassBias(config) if config.use_pairwise_mass_bias else None
         # Same physics encoder, applied to query complement position vs key m/z.
@@ -181,6 +186,24 @@ class MassAwarePeakAttention(Attention):
         value = torch.cat(pieces, dim=2).transpose(1, 2).reshape_as(peaks)
         return self.out(value)
 
+    def _complement_indices(self, mz, padding, complement):
+        """Bounded nearest partners in sorted m/z; -1 denotes no valid edge."""
+        count = self.complement_neighbors
+        searchable = mz.float().masked_fill(padding, float("inf")).contiguous()
+        positions = torch.searchsorted(searchable, complement.float().contiguous())
+        offsets = torch.arange(-count, count + 1, device=mz.device)
+        candidates = positions[..., None] + offsets
+        safe = candidates.clamp(0, mz.shape[1] - 1)
+        owners = torch.arange(len(mz), device=mz.device)[:, None, None]
+        distances = (searchable[owners, safe] - complement[..., None]).abs()
+        invalid = ((candidates < 0) | (candidates >= mz.shape[1]) | padding[..., None]
+                   | (candidates == torch.arange(mz.shape[1], device=mz.device)[None, :, None]))
+        distances = distances.masked_fill(invalid, float("inf"))
+        # Stable ordering makes equal-distance candidates reproducible.
+        selected = distances.argsort(dim=-1, stable=True)[..., :count]
+        indices = candidates.gather(-1, selected)
+        return indices.masked_fill(distances.gather(-1, selected) > self.complement_tolerance_da, -1)
+
     def _windows(self, peaks, mz, padding, intensity, shift, complement=None):
         b, n, d = peaks.shape
         right = (-n - shift) % self.window
@@ -188,7 +211,7 @@ class MassAwarePeakAttention(Attention):
         padded_length = tokens.shape[1]
         windows = padded_length // self.window
         window_padding = F.pad(padding, (shift, right), value=True).reshape(b * windows, self.window)
-        if not self.has_bias and not self.landmarks:
+        if not self.has_bias and not self.landmarks and not self.complement_neighbors:
             # Preserve the original XL attention path for old checkpoints.
             safe_padding = window_padding.clone()
             safe_padding[safe_padding.all(-1), 0] = False
@@ -197,6 +220,12 @@ class MassAwarePeakAttention(Attention):
             return update[:, shift:shift + n]
 
         q, k, v = self._project(tokens)
+        full_k, full_v = k.transpose(1, 2), v.transpose(1, 2)
+        neighbors = None
+        if self.complement_neighbors:
+            neighbors = self._complement_indices(mz, padding, complement)
+            neighbors = F.pad(neighbors, (0, 0, shift, right), value=-1).reshape(
+                b * windows, self.window * self.complement_neighbors)
 
         def window_view(value):
             return value.reshape(b, self.heads, windows, self.window, self.dim).permute(0, 2, 1, 3, 4).reshape(
@@ -231,6 +260,22 @@ class MassAwarePeakAttention(Attention):
             values = torch.cat([vc, anchor_v[owners]], dim=2)
             key_mz = torch.cat([mc, anchor_mz[owners]], dim=1)
             key_padding = torch.cat([pc, anchor_padding[owners] | duplicate], dim=1)
+            if neighbors is not None:
+                # Share the union of query-selected partners within each window.
+                # At most window * complement_neighbors extra keys; never N*N.
+                indices = neighbors[offset:offset + len(qc)].sort(dim=1).values
+                invalid = (indices < 0) | ((indices >= left[:, None]) &
+                                           (indices < left[:, None] + self.window))
+                invalid[:, 1:] |= indices[:, 1:] == indices[:, :-1]
+                invalid |= ((indices[..., None] == anchor_indices[owners, None, :]) &
+                            ~anchor_padding[owners, None, :]).any(-1)
+                safe = indices.clamp_min(0)
+                nk = full_k[owners[:, None], safe + shift].transpose(1, 2)
+                nv = full_v[owners[:, None], safe + shift].transpose(1, 2)
+                keys = torch.cat([keys, nk], dim=2)
+                values = torch.cat([values, nv], dim=2)
+                key_mz = torch.cat([key_mz, mz[owners[:, None], safe]], dim=1)
+                key_padding = torch.cat([key_padding, invalid], dim=1)
             pieces.append(self._run_attention(qc, keys, values, mc, key_mz, key_padding, cc))
             offset += len(qc)
         value = torch.cat(pieces, dim=0).reshape(b, windows, self.heads, self.window, self.dim)
@@ -238,9 +283,9 @@ class MassAwarePeakAttention(Attention):
         return self.out(value[:, shift:shift + n])
 
     def forward_peaks(self, peaks, mz, padding, intensity, shift, complement=None):
-        if self.complement_bias is not None and complement is None:
+        if (self.complement_bias is not None or self.complement_neighbors) and complement is None:
             raise ValueError("This model needs complement_mz inputs")
-        if self.complement_bias is None:
+        if self.complement_bias is None and not self.complement_neighbors:
             complement = None
         if peaks.shape[1] <= self.full_limit:
             return self._full(peaks, mz, padding, complement)
@@ -300,6 +345,9 @@ class XLPeakClassifier(nn.Module):
             raise ValueError("Pairwise frequency, hidden and chunk sizes must be positive")
         if config.mass_attention_landmarks < 0:
             raise ValueError("mass_attention_landmarks must be nonnegative")
+        if (not isinstance(config.complement_neighbors, int) or config.complement_neighbors < 0
+                or not math.isfinite(config.complement_tolerance_da) or config.complement_tolerance_da <= 0):
+            raise ValueError("complement_neighbors must be a nonnegative integer and tolerance must be positive")
         if not 0 <= config.dropout < 1 or not 0 < config.mz_min_wavelength < config.mz_max_wavelength:
             raise ValueError("Invalid dropout or m/z wavelengths")
         self.config = config
