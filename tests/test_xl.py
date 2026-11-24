@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 
 from split_data_xl import split_data
-from src.inference.run_xl import build_sample, iter_mgf, run_inference
+from src.inference.run_xl import build_sample, iter_mgf, run_inference, scan_number
 from src.model.xl import (MassAwarePeakAttention, PairwiseMassBias, XLConfig,
                           XLPeakClassifier, model_inputs)
 from src.training.train_xl import WeightEMA, sample_weights, select_threshold, train
@@ -386,6 +386,11 @@ class XLTest(unittest.TestCase):
         self.assertGreater(float(chunked.blocks[0].local_attn.mass_bias.network[0].weight.grad.abs().sum()), 0)
         self.assertGreater(float(chunked.blocks[0].local_attn.complement_bias.network[0].weight.grad.abs().sum()), 0)
 
+        # Inference compacts the remote keys but keeps the same attention edges.
+        chunked.eval()
+        with torch.inference_mode():
+            torch.testing.assert_close(chunked(**batch), first, atol=1e-6, rtol=1e-5)
+
         # Query chunking also preserves full short-spectrum attention.
         attention = chunked.blocks[0].local_attn.eval()
         attention.full_limit = 32
@@ -473,6 +478,20 @@ class XLTest(unittest.TestCase):
         self.assertEqual(threshold, 0.3)
         for p, y in samples.values():
             self.assertEqual(float((p[y.astype(bool)] >= threshold).mean()), 1.0)
+
+    def test_scan_id_from_single_scan_title(self):
+        metadata = {"TITLE": "run.with.dots.287.287.3"}
+        self.assertEqual(scan_number(metadata, "auto"), 287)
+        self.assertIsNone(scan_number(metadata, "scans"))
+        self.assertEqual(scan_number({**metadata, "SCANS": "288"}, "auto"), 288)
+        self.assertIsNone(scan_number({"TITLE": "run.287.289.3"}, "auto"))
+
+    def test_scan_id_from_native_id_title(self):
+        metadata = {"TITLE": 'run.13.13.3 File:"run.raw", NativeID:"controllerType=0 controllerNumber=1 scan=13"'}
+        self.assertEqual(scan_number(metadata, "auto"), 13)
+        self.assertEqual(scan_number({**metadata, "SCANS": "14"}, "auto"), 14)
+        self.assertIsNone(scan_number(metadata, "scans"))
+        self.assertIsNone(scan_number({"TITLE": 'run File:"scan=13.raw", NativeID:"index=1"'}, "auto"))
 
     def test_full_split_train_inference_and_resume(self):
         with tempfile.TemporaryDirectory(prefix="xl-test-") as folder:

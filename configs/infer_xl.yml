@@ -1,7 +1,9 @@
 project_root: ..
 
 input:
-  # Each file is one acquisition run, in SCANS order, with PEPMASS and CHARGE.
+  # Each file is one acquisition run with PEPMASS and CHARGE.
+  # auto reads SCANS or the scan ID in a NativeID or .scan.scan.charge TITLE.
+  scan_source: auto
   mgf_paths:
     - data/example.mgf
 

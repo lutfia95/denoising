@@ -5,6 +5,7 @@ import argparse
 from collections import deque
 import csv
 from pathlib import Path
+import re
 
 import numpy as np
 import torch
@@ -13,6 +14,10 @@ from src.model.xl import XLConfig, XLPeakClassifier, amp_context, model_inputs
 from src.xl_data import (XLFeatureConfig, XLNormalizer, complement_target, make_features,
                          model_peak_arrays, prepare_arrays, read_config, resolve_path,
                          write_json, xl_collate)
+
+SCAN_TITLE = re.compile(r".+\.([0-9]+)\.([0-9]+)\.[0-9]+")
+NATIVE_ID = re.compile(r'\bNativeID:\s*"([^"]*)"')
+NATIVE_SCAN = re.compile(r"(?:^|\s)scan=([0-9]+)(?=\s|$)")
 
 
 def iter_mgf(path):
@@ -44,7 +49,25 @@ def iter_mgf(path):
             raise ValueError(f"{path}: missing END IONS")
 
 
-def build_sample(peaks, params, features, normalizer, history, last_scan):
+def scan_number(metadata, scan_source):
+    if "SCANS" in metadata:
+        return int(metadata["SCANS"])
+    if scan_source == "auto":
+        title = metadata.get("TITLE", "")
+        native_id = NATIVE_ID.search(title)
+        if native_id:
+            native_scan = NATIVE_SCAN.search(native_id[1])
+            if native_scan:
+                return int(native_scan[1])
+        # Some exporters record basename.first_scan.last_scan.charge in TITLE.
+        match = SCAN_TITLE.fullmatch(title)
+        if match and int(match[1]) == int(match[2]):
+            return int(match[1])
+    return None
+
+
+def build_sample(peaks, params, features, normalizer, history, last_scan, *,
+                 scan_source="auto", scan_override=None):
     metadata = {key.upper(): value for key, value in params}
     precursor = float(metadata["PEPMASS"].split()[0])
     charge_value = metadata["CHARGE"].strip()
@@ -54,11 +77,12 @@ def build_sample(peaks, params, features, normalizer, history, last_scan):
     charge = int(charge_value.rstrip("+"))
     mz, intensity, _, order = prepare_arrays(peaks[:, 0], peaks[:, 1])
     peak, spectrum, histogram = make_features(mz, intensity, charge, precursor, features)
-    scan = int(metadata["SCANS"]) if "SCANS" in metadata else None
+    scan = scan_override if scan_override is not None else scan_number(metadata, scan_source)
     if features.previous_spectra and scan is None:
-        raise ValueError("XL history requires integer SCANS in MGF. Train with previous_spectra: 0 if scan IDs are unavailable.")
+        raise ValueError("XL could not read a scan ID. Use input.scan_source: auto to read SCANS or "
+                         "single-scan TITLEs, or file_order for MGFs already in acquisition order.")
     if features.previous_spectra and last_scan is not None and scan < last_scan:
-        raise ValueError("MGF spectra must be ordered by SCANS for causal history")
+        raise ValueError(f"MGF scan IDs must be in acquisition order for XL history: {scan} after {last_scan}")
     context = np.zeros((features.previous_spectra + 1, 4 + features.histogram_bins), dtype=np.float32)
     context[0] = np.r_[normalizer.spectrum(spectrum, features), histogram]
     mask = np.ones(features.previous_spectra + 1, dtype=bool)
@@ -98,6 +122,12 @@ def run_inference(config, root):
     if checkpoint.get("format") not in ("xl-v1", "xl-v2"):
         raise ValueError("Expected an XL checkpoint; legacy transformer checkpoints are incompatible")
     features = XLFeatureConfig(**checkpoint["feature_config"])
+    inputs = config["input"]
+    scan_source = inputs.get("scan_source", "auto")
+    if scan_source not in ("auto", "scans", "file_order"):
+        raise ValueError("input.scan_source must be auto, scans or file_order")
+    if scan_source == "file_order" and features.previous_spectra and features.max_scan_gap is not None:
+        raise ValueError("This checkpoint uses max_scan_gap, which requires actual SCANS values")
     normalizer = XLNormalizer(**checkpoint["normalizer"])
     model = XLPeakClassifier(XLConfig.from_checkpoint(checkpoint["model_config"]))
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -106,6 +136,7 @@ def run_inference(config, root):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu") if name == "auto" else torch.device(name)
     torch.set_num_threads(int(runtime.get("cpu_num_threads", 8)))
     model.to(device).eval()
+    training_config = checkpoint["config"]["training"]
     override = config.get("evaluation", {}).get("threshold")
     threshold = float(override) if override is not None else float(checkpoint["threshold"])
     if not 0 <= threshold <= 1:
@@ -114,7 +145,7 @@ def run_inference(config, root):
         raise ValueError("Checkpoint threshold is not tuned yet; finish training or explicitly set evaluation.threshold")
     output = resolve_path(root, config["output"]["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
-    paths = [resolve_path(root, p) for p in config["input"]["mgf_paths"]]
+    paths = [resolve_path(root, p) for p in inputs["mgf_paths"]]
     if not paths or len({p.stem for p in paths}) != len(paths):
         raise ValueError("Provide MGF paths with distinct stems")
     summaries = []
@@ -131,7 +162,11 @@ def run_inference(config, root):
             score_writer = csv.writer(score_handle) if score_handle else None
             if score_writer:
                 score_writer.writerow(["spectrum_index", "peak_index", "mz", "intensity", "score", "kept"])
-            with destination.open("w") as mgf, report.open("w", newline="") as report_handle:
+            with (
+                destination.open("w") as mgf,
+                report.open("w", newline="") as report_handle,
+                amp_context(device, training_config),
+            ):
                 report_writer = csv.writer(report_handle)
                 report_writer.writerow(["spectrum_index", "title", "scan", "input_peaks", "kept_peaks", "retained_intensity_fraction"])
                 for params, peaks in iter_mgf(path):
@@ -141,24 +176,29 @@ def run_inference(config, root):
                         report_writer.writerow([n_spectra, metadata.get("TITLE", ""), metadata.get("SCANS", ""), 0, 0, 0])
                         n_spectra += 1
                         continue
-                    sample, order, last_scan = build_sample(peaks, params, features, normalizer, history, last_scan)
+                    scan_override = n_spectra if scan_source == "file_order" else None
+                    sample, order, last_scan = build_sample(peaks, params, features, normalizer, history,
+                                                            last_scan, scan_source=scan_source,
+                                                            scan_override=scan_override)
                     batch = xl_collate([sample])
-                    with amp_context(device, checkpoint["config"]["training"]):
-                        logits = model(**model_inputs(batch, device))
+                    logits = model(**model_inputs(batch, device))
                     scores_sorted = logits.float().sigmoid()[0].cpu().numpy()
                     scores = np.empty_like(scores_sorted)
                     scores[order] = scores_sorted
                     keep = scores >= threshold
                     # Neither minimum-kept-peaks nor an intensity fallback changes
                     # the validated decision rule without being evaluated first.
-                    write_spectrum(mgf, params, peaks[keep])
-                    report_writer.writerow([n_spectra, metadata.get("TITLE", ""), last_scan,
-                         len(peaks), int(keep.sum()), float(peaks[keep, 1].sum() / max(float(peaks[:, 1].sum()), 1e-12))])
+                    retained_peaks = peaks[keep]
+                    write_spectrum(mgf, params, retained_peaks)
+                    reported_scan = metadata.get("SCANS", "") if scan_source == "file_order" else last_scan
+                    report_writer.writerow([n_spectra, metadata.get("TITLE", ""), reported_scan,
+                         len(peaks), len(retained_peaks),
+                         float(retained_peaks[:, 1].sum() / max(float(peaks[:, 1].sum()), 1e-12))])
                     if score_writer:
                         for j, ((mz, intensity), score, selected) in enumerate(zip(peaks, scores, keep)):
                             score_writer.writerow([n_spectra, j, mz, intensity, float(score), bool(selected)])
                     total_peaks += len(peaks)
-                    kept_peaks += int(keep.sum())
+                    kept_peaks += len(retained_peaks)
                     n_spectra += 1
                     if n_spectra % 100 == 0:
                         print(f"{path.name}: {n_spectra} spectra", flush=True)
@@ -168,7 +208,7 @@ def run_inference(config, root):
         summaries.append({"input": str(path), "output": str(destination), "spectra": n_spectra,
                           "input_peaks": total_peaks, "kept_peaks": kept_peaks})
     write_json(output / "inference_summary.json", {"checkpoint": str(checkpoint_path), "threshold": threshold,
-               "feature_config": checkpoint["feature_config"], "files": summaries})
+               "feature_config": checkpoint["feature_config"], "scan_source": scan_source, "files": summaries})
     print(f"Wrote filtered MGF and reports to {output}", flush=True)
     return summaries
 

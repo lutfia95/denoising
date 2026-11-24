@@ -153,7 +153,7 @@ class MassAwarePeakAttention(Attention):
 
     def _attend(self, q, k, v, query_mz, key_mz, key_padding, query_complement=None):
         key_padding = key_padding.clone()
-        key_padding[key_padding.all(-1), 0] = False
+        key_padding[:, 0] &= ~key_padding.all(-1)
         if not self.has_bias:
             mask = ~key_padding[:, None, None, :]
         else:
@@ -269,7 +269,18 @@ class MassAwarePeakAttention(Attention):
                 invalid[:, 1:] |= indices[:, 1:] == indices[:, :-1]
                 invalid |= ((indices[..., None] == anchor_indices[owners, None, :]) &
                             ~anchor_padding[owners, None, :]).any(-1)
-                safe = indices.clamp_min(0)
+                if not self.training:
+                    # Pack valid partners first, preserving their m/z order. Only
+                    # pad to the largest valid partner count in this chunk.
+                    width = int((~invalid).sum(dim=1).max())
+                    if peaks.is_cuda:
+                        # Keep the SDPA mask rows aligned for CUDA fused kernels.
+                        width = min(indices.shape[1], width + (-(self.window + count + width) % 8))
+                    packed = indices.masked_fill(invalid, n).sort(dim=1).values[:, :width]
+                    invalid = packed == n
+                    safe = packed.masked_fill(invalid, 0)
+                else:
+                    safe = indices.clamp_min(0)
                 nk = full_k[owners[:, None], safe + shift].transpose(1, 2)
                 nv = full_v[owners[:, None], safe + shift].transpose(1, 2)
                 keys = torch.cat([keys, nk], dim=2)
